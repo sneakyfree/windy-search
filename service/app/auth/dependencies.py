@@ -93,8 +93,8 @@ async def require_passport_with_eii_rate_limit(
 
 
 def require_passport_with_cost_cap(capability: str):
-    """B.9 — factory that returns a dependency gating on rate-limit AND
-    monthly USD budget. Routes use it like:
+    """B.9 + B.9.2 — factory composing rate-limit + tier-scaled monthly
+    USD budget. Routes use it like:
 
         @router.post("/search", ...)
         async def web_search(
@@ -102,9 +102,22 @@ def require_passport_with_cost_cap(capability: str):
             claims: PassportClaims = Depends(require_passport_with_cost_cap("web.search")),
         ): ...
 
-    The cost catalog lives in app/eii/cost_cap.py:COSTS — adding a new
-    capability there is enough; routes opt-in by passing the capability
-    name to this factory.
+    Cap = settings.monthly_cost_cap_usd_default × tier.cost_cap_multiplier.
+    Same EII score that drives the rate-limit tier (B.3) drives the
+    cost-cap multiplier — one decision, two effects:
+
+      Exceptional (900+) → 200/min, $50/month
+      Trusted     (700+) → 100/min, $25/month
+      Developing  (500+) →  50/min,  $5/month  ← baseline
+      Watch       (400+) →  20/min,  $2/month
+      Critical    (<400) →   5/min,  $0.50/month
+
+    The cost catalog lives in app/eii/cost_cap.py:COSTS — adding a
+    capability there is enough; routes opt-in by passing the
+    capability name to this factory.
+
+    Tier lookup re-uses the cached score from B.3's rate-limit pass —
+    no duplicate eternitas round-trip thanks to the TTL'd score_cache.
     """
     async def _dep(
         request: Request,
@@ -113,17 +126,33 @@ def require_passport_with_cost_cap(capability: str):
     ) -> PassportClaims:
         settings = get_settings()
         redis = getattr(request.app.state, "redis", None)
+        score_cache = getattr(request.app.state, "score_cache", None)
+
+        # B.9.2 — scale the base cap by the passport's tier multiplier.
+        # Default to 1.0× if score_cache isn't configured (matches the
+        # B.3 fail-open posture).
+        cap_multiplier = 1.0
+        tier_name = "developing"
+        if score_cache is not None:
+            score = await score_cache.get(claims.passport)
+            tier = tier_for_score(score)
+            cap_multiplier = tier.cost_cap_multiplier
+            tier_name = tier.name
+
+        cap_usd = settings.monthly_cost_cap_usd_default * cap_multiplier
         decision = await cost_cap.charge(
             redis,
             passport=claims.passport,
             capability=capability,
-            cap_usd=settings.monthly_cost_cap_usd_default,
+            cap_usd=cap_usd,
             warning_pct=settings.monthly_cost_warning_pct,
         )
 
         response.headers["X-Cost-Cap-USD"] = f"{decision.cap_microcents / cost_cap.MICROCENTS_PER_USD:.2f}"
         response.headers["X-Cost-Used-USD"] = f"{decision.used_after / cost_cap.MICROCENTS_PER_USD:.6f}"
         response.headers["X-Cost-Capability"] = capability
+        response.headers["X-Cost-Tier"] = tier_name
+        response.headers["X-Cost-Tier-Multiplier"] = f"{cap_multiplier:g}"
         if decision.warning:
             response.headers["X-Cost-Warning"] = (
                 f"Crossed {int(settings.monthly_cost_warning_pct * 100)}% of monthly budget"
@@ -133,7 +162,7 @@ def require_passport_with_cost_cap(capability: str):
             raise HTTPException(
                 status_code=429,
                 detail=(
-                    f"Monthly budget exhausted (cap "
+                    f"Monthly budget exhausted ({tier_name} tier cap "
                     f"${decision.cap_microcents / cost_cap.MICROCENTS_PER_USD:.2f}). "
                     f"Resets on the 1st."
                 ),
@@ -142,6 +171,7 @@ def require_passport_with_cost_cap(capability: str):
                     "X-Cost-Cap-USD": f"{decision.cap_microcents / cost_cap.MICROCENTS_PER_USD:.2f}",
                     "X-Cost-Used-USD": f"{decision.used_after / cost_cap.MICROCENTS_PER_USD:.6f}",
                     "X-Cost-Capability": capability,
+                    "X-Cost-Tier": tier_name,
                 },
             )
 
