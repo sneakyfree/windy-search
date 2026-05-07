@@ -17,9 +17,12 @@ This codon establishes the service skeleton. Subsequent codons add:
 from contextlib import asynccontextmanager
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.auth.dependencies import require_passport
+from app.auth.ept import PassportClaims
+from app.auth.jwks import JWKSCache
 from app.config import get_settings
 
 
@@ -37,6 +40,11 @@ async def lifespan(app: FastAPI):
         except Exception:
             redis_client = None
     app.state.redis = redis_client
+
+    # B.2 — JWKS cache for EPT verification. Lazy: the first request
+    # triggers the network fetch, not startup. Tests can override this
+    # by setting `app.state.jwks_cache` before the request fires.
+    app.state.jwks_cache = JWKSCache(jwks_url=settings.eternitas_jwks_url)
 
     yield
 
@@ -96,6 +104,25 @@ def create_app() -> FastAPI:
         return {
             "status": "ready" if redis_ok else "degraded",
             "redis": redis_ok,
+        }
+
+    @app.get("/whoami")
+    async def whoami(claims: PassportClaims = Depends(require_passport)) -> dict:
+        """B.2 self-check — returns the parsed passport claims.
+
+        Useful for clients debugging their EPT setup. Subsequent codons
+        require this same dependency on the `web.*` endpoints, so getting
+        a 200 here proves the auth wiring works before more dangerous
+        routes go live.
+        """
+        return {
+            "passport": claims.passport,
+            "operator_id": claims.operator_id,
+            "bot_name": claims.bot_name,
+            "bot_type": claims.bot_type,
+            "verification_tier": claims.verification_tier,
+            "trust_score_legacy": claims.trust_score,
+            "expires_at": claims.expires_at,
         }
 
     return app
