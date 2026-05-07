@@ -22,6 +22,7 @@ from app.auth.ept import PassportClaims
 from app.config import get_settings
 from app.eii import cost_cap, result_cache
 from app.eternitas_client import EternitasClient
+from app.web.extract import extract_structured_data
 from app.web.fetch import (
     MAX_BYTES_FETCH,
     UnsafeURLError,
@@ -341,3 +342,102 @@ def _safe_host(url: str) -> str:
     """Hostname only — never log full URL into integrity-event audit."""
     from urllib.parse import urlparse
     return urlparse(url).hostname or ""
+
+
+# -------------------------------------------------------------------------
+# B.7 — /web/extract
+# -------------------------------------------------------------------------
+
+
+class ExtractRequest(BaseModel):
+    url: str = Field(..., min_length=8, max_length=2048)
+    extract_schema: dict = Field(
+        ..., alias="schema",
+        description="JSON Schema describing the structure to extract",
+    )
+    instruction: str | None = Field(default=None, max_length=2000)
+
+    class Config:
+        populate_by_name = True
+
+
+class ExtractResponseModel(BaseModel):
+    url: str
+    final_url: str
+    extracted: dict
+    integrity_event_posted: bool
+
+
+@router.post("/extract", response_model=ExtractResponseModel)
+async def web_extract(
+    body: ExtractRequest,
+    request: Request,
+    claims: PassportClaims = Depends(require_passport_with_cost_cap("web.extract")),
+) -> ExtractResponseModel:
+    """Extract JSON-Schema-shaped structured data from a URL.
+
+    Pipeline:
+      1. Fetch the URL via the existing B.5 fetch_url (SSRF-hardened,
+         redirect re-validation, cache-served). HTML is stripped.
+      2. Send (content, schema, optional instruction) to Claude via
+         Anthropic OAuth (or Bedrock — future B.7b switch).
+      3. Parse Claude's JSON output. Strip any code-fence wrapper
+         the model may add despite instructions.
+      4. Post integrity event.
+
+    Failure mapping:
+      - SSRF check fail (scheme/host/IP/redirect target) → 400
+      - Anthropic not configured → 503
+      - Anthropic returned non-200 OR non-JSON → 502
+      - Upstream HTTP/network → 502
+    """
+    anthropic = getattr(request.app.state, "anthropic_client", None)
+    if anthropic is None or not anthropic.configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Extraction unavailable — Anthropic client not configured",
+        )
+
+    try:
+        fetched = await fetch_url(body.url, max_chars=MAX_BYTES_FETCH, offset=0)
+    except UnsafeURLError as e:
+        raise HTTPException(status_code=400, detail=f"unsafe URL: {e}")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"upstream HTTP {e.response.status_code}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"upstream network error: {e}")
+
+    try:
+        extracted = await extract_structured_data(
+            page_content=fetched.content,
+            schema=body.extract_schema,
+            instruction=body.instruction,
+            anthropic_client=anthropic,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    eternitas: Optional[EternitasClient] = getattr(request.app.state, "eternitas_client", None)
+    posted = False
+    if eternitas is not None:
+        idem = f"extract:{claims.passport}:{uuid.uuid4().hex}"
+        post_resp = await eternitas.submit_integrity_event(
+            passport=claims.passport,
+            event_type="web.extract.completed",
+            dimension="reliability",
+            delta_hint=1,
+            source="windy-search",
+            context={
+                "url_host": _safe_host(body.url),
+                "schema_top_level_keys": list(body.extract_schema.get("properties", {}).keys())[:10],
+            },
+            idempotency_key=idem,
+        )
+        posted = post_resp is not None
+
+    return ExtractResponseModel(
+        url=body.url,
+        final_url=fetched.final_url,
+        extracted=extracted,
+        integrity_event_posted=posted,
+    )

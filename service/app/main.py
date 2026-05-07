@@ -29,6 +29,7 @@ from app.auth.dependencies import (
 from app.auth.ept import PassportClaims
 from app.auth.jwks import JWKSCache
 from app.config import get_settings
+from app.anthropic_client import AnthropicClient
 from app.eii.score_cache import IntegrityScoreCache
 from app.eii.tiers import tier_for_score
 from app.eternitas_client import EternitasClient
@@ -68,6 +69,14 @@ async def lifespan(app: FastAPI):
     app.state.eternitas_client = EternitasClient(
         base_url=settings.eternitas_base_url,
         platform_api_key=settings.eternitas_platform_api_key,
+    )
+
+    # B.7 — Anthropic client for /web/extract. Optional — when the OAuth
+    # token isn't set, /web/extract returns 503 but the rest of the
+    # service operates normally.
+    app.state.anthropic_client = AnthropicClient(
+        oauth_token=settings.anthropic_oauth_token,
+        model=settings.anthropic_model,
     )
 
     yield
