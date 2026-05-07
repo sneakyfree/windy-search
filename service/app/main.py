@@ -20,10 +20,15 @@ import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.auth.dependencies import require_passport
+from app.auth.dependencies import (
+    require_passport,
+    require_passport_with_eii_rate_limit,
+)
 from app.auth.ept import PassportClaims
 from app.auth.jwks import JWKSCache
 from app.config import get_settings
+from app.eii.score_cache import IntegrityScoreCache
+from app.eii.tiers import tier_for_score
 
 
 @asynccontextmanager
@@ -45,6 +50,9 @@ async def lifespan(app: FastAPI):
     # triggers the network fetch, not startup. Tests can override this
     # by setting `app.state.jwks_cache` before the request fires.
     app.state.jwks_cache = JWKSCache(jwks_url=settings.eternitas_jwks_url)
+
+    # B.3 — EII score cache feeds the per-tier rate limiter.
+    app.state.score_cache = IntegrityScoreCache(eternitas_base_url=settings.eternitas_base_url)
 
     yield
 
@@ -110,10 +118,9 @@ def create_app() -> FastAPI:
     async def whoami(claims: PassportClaims = Depends(require_passport)) -> dict:
         """B.2 self-check — returns the parsed passport claims.
 
-        Useful for clients debugging their EPT setup. Subsequent codons
-        require this same dependency on the `web.*` endpoints, so getting
-        a 200 here proves the auth wiring works before more dangerous
-        routes go live.
+        Deliberately NOT rate-limited: this is a debugging endpoint with
+        no external resource cost. The B.3 rate limit gates the
+        capability endpoints (B.4-B.8) where actual cost lives.
         """
         return {
             "passport": claims.passport,
@@ -123,6 +130,26 @@ def create_app() -> FastAPI:
             "verification_tier": claims.verification_tier,
             "trust_score_legacy": claims.trust_score,
             "expires_at": claims.expires_at,
+        }
+
+    @app.get("/integrity")
+    async def my_integrity(
+        claims: PassportClaims = Depends(require_passport_with_eii_rate_limit),
+    ) -> dict:
+        """B.3 — agent self-check for current EII tier + rate-limit budget.
+
+        First gated endpoint. Exercises the full path: EPT verify → score
+        fetch (cached 5 min) → tier lookup → rate-limit check → response
+        headers carrying the tier + count. Agents call this to know how
+        many requests they have left before they get throttled.
+        """
+        score = await app.state.score_cache.get(claims.passport)
+        tier = tier_for_score(score)
+        return {
+            "passport": claims.passport,
+            "score": score,
+            "tier": tier.name,
+            "limit_per_minute": tier.requests_per_minute,
         }
 
     return app
