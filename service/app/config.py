@@ -48,8 +48,16 @@ class Settings(BaseSettings):
     browserbase_api_key: str | None = None
     browserbase_project_id: str | None = None
 
-    # --- B.7 Anthropic (Claude vision for extract; deferred) -------------
-    anthropic_api_key: str | None = None
+    # --- B.7 Anthropic (Claude for structured extraction) ---------------
+    # OAuth token (sk-ant-oat01-*) for Grant's $200/mo Max plan. Per
+    # feedback_anthropic_oauth_gate.md, this requires Bearer auth +
+    # `anthropic-beta: oauth-2025-04-20` + a two-block system array
+    # whose first block is the magic Claude-Code gate string.
+    # ToS reminder: only legitimate for personal use of Grant's own
+    # subscription. Multi-user fan-out should migrate to per-user
+    # sk-ant-api03-* keys or Bedrock (Bill's AWS account, see lockbox).
+    anthropic_oauth_token: str | None = None
+    anthropic_model: str = "claude-sonnet-4-6"
 
     # --- B.9 Cost caps ---------------------------------------------------
     monthly_cost_cap_usd_default: float = 5.0
