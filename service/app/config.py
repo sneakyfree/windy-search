@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     eternitas_base_url: str = "https://api.eternitas.ai"
     eternitas_jwks_url: str = "https://api.eternitas.ai/.well-known/eternitas-keys"
     eternitas_platform_api_key: str | None = None  # et_plt_* — required to POST integrity events
+    # The webhook_secret eternitas registered alongside our platform key.
+    # When present, /webhooks verifies X-Eternitas-Signature HMAC and acts
+    # on integrity.event payloads (invalidates the cached EII score).
+    # When absent, /webhooks 204s without consumption.
+    eternitas_webhook_secret: str | None = None
 
     # --- Search backends (B.4) -------------------------------------------
     brave_search_api_key: str | None = None  # falls back to DDG when None

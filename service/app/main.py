@@ -14,10 +14,12 @@ This codon establishes the service skeleton. Subsequent codons add:
   B.12 — Tool registration in Windy Fly
 """
 
+import json
+import logging
 from contextlib import asynccontextmanager
 
 import redis.asyncio as aioredis
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth.dependencies import (
@@ -31,6 +33,9 @@ from app.eii.score_cache import IntegrityScoreCache
 from app.eii.tiers import tier_for_score
 from app.eternitas_client import EternitasClient
 from app.web.router import router as web_router
+from app.webhooks.consumer import handle_event, verify_signature
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -97,23 +102,59 @@ def create_app() -> FastAPI:
     )
 
     @app.post("/webhooks", status_code=204, include_in_schema=False)
-    async def webhooks_inbox() -> None:
-        """Eternitas webhook inbox — accept-and-discard stub.
+    async def webhooks_inbox(
+        request: Request,
+        x_eternitas_signature: str | None = Header(default=None),
+        x_eternitas_event: str | None = Header(default=None),
+    ) -> Response:
+        """Eternitas firehose inbox.
 
-        We registered with eternitas as a *platform*, which triggers
-        firehose fan-out of every system event (passport.*, integrity.*,
-        etc.) to whatever URL we configured. Until B.x lands a real
-        consumer, returning 204 keeps the dispatcher's per-platform
-        consecutive-failures counter at 0 — three failed deliveries in a
-        row deactivate the platform key (eternitas/services/
-        webhook_dispatcher.py:272), which would silently break the
-        integrity-event posts windy-search makes back to eternitas.
+        Verifies X-Eternitas-Signature HMAC against `eternitas_webhook_secret`,
+        then routes by event_type to the consumer's handlers (currently:
+        integrity.event → score cache invalidation). Always 204s so the
+        eternitas dispatcher can't probe for handling success/failure.
 
-        Future codon: HMAC-verify with our webhook_secret, do something
-        useful with passport.created / integrity.event payloads (cache
-        invalidation, score-tier change tracking, etc).
+        When `eternitas_webhook_secret` isn't configured, falls through to
+        accept-and-discard — preserves the B.11-followup behavior (keep
+        dispatcher's consecutive-failures counter at 0) for environments
+        that haven't provisioned the secret yet.
         """
-        return None
+        body_bytes = await request.body()
+
+        if settings.eternitas_webhook_secret:
+            if not verify_signature(
+                body_bytes,
+                x_eternitas_signature,
+                settings.eternitas_webhook_secret,
+            ):
+                # Don't reveal verification failure as 401 — that would let
+                # an attacker probe the secret. Log + accept silently.
+                logger.warning(
+                    "webhook HMAC mismatch (event=%s, sig=%s)",
+                    x_eternitas_event, (x_eternitas_signature or "")[:20],
+                )
+                return Response(status_code=204)
+
+            try:
+                payload = json.loads(body_bytes.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError) as e:
+                logger.warning("webhook payload decode failed: %s", e)
+                return Response(status_code=204)
+
+            # Event type is also in the body; the header is for fast routing
+            # but we trust the body since HMAC just covered it.
+            event_type = (
+                x_eternitas_event
+                or payload.get("event_type")
+                or payload.get("event")
+                or ""
+            )
+            try:
+                await handle_event(event_type, payload, app.state)
+            except Exception:  # never let a handler bug surface as 5xx
+                logger.exception("handler error for event_type=%s", event_type)
+
+        return Response(status_code=204)
 
     @app.get("/health")
     async def health() -> dict:
