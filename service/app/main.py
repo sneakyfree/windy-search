@@ -29,6 +29,8 @@ from app.auth.jwks import JWKSCache
 from app.config import get_settings
 from app.eii.score_cache import IntegrityScoreCache
 from app.eii.tiers import tier_for_score
+from app.eternitas_client import EternitasClient
+from app.web.router import router as web_router
 
 
 @asynccontextmanager
@@ -53,6 +55,15 @@ async def lifespan(app: FastAPI):
 
     # B.3 — EII score cache feeds the per-tier rate limiter.
     app.state.score_cache = IntegrityScoreCache(eternitas_base_url=settings.eternitas_base_url)
+
+    # B.4 — Eternitas event poster. Best-effort: when the platform key
+    # isn't configured (B.11 deploy hasn't provisioned it yet), the
+    # client lives but skips posts. Capabilities still return results;
+    # only the audit trail is missing.
+    app.state.eternitas_client = EternitasClient(
+        base_url=settings.eternitas_base_url,
+        platform_api_key=settings.eternitas_platform_api_key,
+    )
 
     yield
 
@@ -151,6 +162,8 @@ def create_app() -> FastAPI:
             "tier": tier.name,
             "limit_per_minute": tier.requests_per_minute,
         }
+
+    app.include_router(web_router)
 
     return app
 

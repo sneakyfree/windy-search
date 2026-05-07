@@ -13,6 +13,7 @@ the operator's choice is throughput over hardening when Redis is down.
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Optional
 
@@ -50,7 +51,10 @@ async def check(
     now_ms = int(time.time() * 1000)
     cutoff_ms = now_ms - WINDOW_MS
     key = _key(passport)
-    member = f"{now_ms}:{id(object())}"  # unique per call within the same ms
+    # uuid4 is collision-free across the cluster; id(object()) on CPython
+    # can recycle within sub-millisecond windows and silently dedupe
+    # entries in the sorted set.
+    member = f"{now_ms}:{uuid.uuid4().hex}"
 
     pipe = redis.pipeline()
     pipe.zremrangebyscore(key, 0, cutoff_ms)
