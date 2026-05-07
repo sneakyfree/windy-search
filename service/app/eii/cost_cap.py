@@ -147,3 +147,29 @@ async def charge(
         capability=capability,
         cost_charged=cost if allowed else 0,
     )
+
+
+async def refund(
+    redis: Optional[aioredis.Redis],
+    passport: str,
+    capability: str,
+) -> int:
+    """Refund a previously-charged cost. Used by B.10 on cache hit so the
+    monthly counter reflects real backend spend, not theoretical.
+
+    Returns the new accumulated total after refund (informational; not
+    surfaced in headers since the cost-cap response headers reflect the
+    pre-refund state, which is fine — caller knows from the cache_hit
+    flag in the response body).
+    """
+    if redis is None:
+        return 0
+    cost = COSTS.get(capability, 0)
+    if cost == 0:
+        return 0
+    key = _key(passport)
+    try:
+        return int(await redis.incrby(key, -cost))
+    except Exception as e:
+        logger.warning("cost refund failed for %s/%s: %s", passport, capability, e)
+        return 0

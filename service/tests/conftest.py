@@ -53,15 +53,18 @@ class StubScoreCache:
 
 
 class FakeRedisB3:
-    """Minimal redis stub supporting the ops B.3 + B.9 use:
-    - sliding-window rate limit: zremrangebyscore + zadd + zcard + expire
-      (in a pipeline; ZADD with unique member per call)
-    - cost cap: incrby + expire (top-level)
+    """Minimal redis stub supporting the ops B.3 + B.9 + B.10 use:
+    - rate limit (B.3): zremrangebyscore + zadd + zcard + expire (pipeline)
+    - cost cap (B.9): incrby + expire (top-level int counters)
+    - result cache (B.10): set + get (top-level string values)
+
+    Different key prefixes keep counter and string namespaces disjoint.
     """
 
     def __init__(self) -> None:
         self._zsets: dict[str, dict[str, float]] = {}
-        self._strings: dict[str, int] = {}
+        # Mixed type — int for counters, str/bytes for cached JSON.
+        self._strings: dict[str, object] = {}
 
     async def ping(self) -> bool:
         return True
@@ -73,10 +76,29 @@ class FakeRedisB3:
         return FakeRedisPipelineB3(self)
 
     async def incrby(self, key: str, delta: int) -> int:
-        self._strings[key] = self._strings.get(key, 0) + int(delta)
-        return self._strings[key]
+        cur = self._strings.get(key, 0)
+        if not isinstance(cur, int):
+            cur = 0
+        self._strings[key] = cur + int(delta)
+        return self._strings[key]  # type: ignore[return-value]
 
     async def expire(self, key: str, seconds: int) -> bool:
+        return True
+
+    async def get(self, key: str) -> bytes | None:
+        v = self._strings.get(key)
+        if v is None:
+            return None
+        if isinstance(v, bytes):
+            return v
+        return str(v).encode()
+
+    async def set(self, key: str, value, ex: int | None = None, nx: bool = False, xx: bool = False, **_) -> bool | None:
+        if nx and key in self._strings:
+            return None
+        if xx and key not in self._strings:
+            return None
+        self._strings[key] = value
         return True
 
 
