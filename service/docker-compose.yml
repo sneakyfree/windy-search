@@ -1,0 +1,43 @@
+# Local dev compose — bring up the service + Redis on a private network.
+# Mirrors eternitas's deploy-prod/docker-compose.yml shape so the
+# eventual prod compose file is a near-clone.
+
+services:
+  search-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - search-redis-data:/data
+    networks:
+      - search-backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  search-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: windy-search-api:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://search-redis:6379/0
+    depends_on:
+      search-redis:
+        condition: service_healthy
+    networks:
+      - search-backend
+    ports:
+      - "127.0.0.1:8500:8500"
+
+volumes:
+  search-redis-data:
+
+networks:
+  search-backend:
+    driver: bridge
