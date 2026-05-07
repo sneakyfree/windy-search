@@ -96,6 +96,25 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.post("/webhooks", status_code=204, include_in_schema=False)
+    async def webhooks_inbox() -> None:
+        """Eternitas webhook inbox — accept-and-discard stub.
+
+        We registered with eternitas as a *platform*, which triggers
+        firehose fan-out of every system event (passport.*, integrity.*,
+        etc.) to whatever URL we configured. Until B.x lands a real
+        consumer, returning 204 keeps the dispatcher's per-platform
+        consecutive-failures counter at 0 — three failed deliveries in a
+        row deactivate the platform key (eternitas/services/
+        webhook_dispatcher.py:272), which would silently break the
+        integrity-event posts windy-search makes back to eternitas.
+
+        Future codon: HMAC-verify with our webhook_secret, do something
+        useful with passport.created / integrity.event payloads (cache
+        invalidation, score-tier change tracking, etc).
+        """
+        return None
+
     @app.get("/health")
     async def health() -> dict:
         """Liveness probe. Always 200 unless the process is dead."""

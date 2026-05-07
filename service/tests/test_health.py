@@ -33,3 +33,12 @@ async def test_openapi_includes_service_identity(client):
     assert spec["info"]["title"] == "Windy Search"
     assert "/health" in spec["paths"]
     assert "/health/ready" in spec["paths"]
+
+
+@pytest.mark.asyncio
+async def test_webhooks_stub_accepts_and_discards(client):
+    """POST /webhooks → 204, no auth, no body required. Lets the eternitas
+    dispatcher's per-platform failure counter stay at 0 until we wire a
+    real consumer."""
+    resp = await client.post("/webhooks", json={"event_type": "test", "data": {}})
+    assert resp.status_code == 204
