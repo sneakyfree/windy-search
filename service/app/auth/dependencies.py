@@ -3,7 +3,8 @@
 from fastapi import Depends, Header, HTTPException, Request, Response
 
 from app.auth.ept import PassportClaims, verify_ept
-from app.eii import rate_limit
+from app.config import get_settings
+from app.eii import cost_cap, rate_limit
 from app.eii.tiers import tier_for_score
 
 
@@ -89,3 +90,61 @@ async def require_passport_with_eii_rate_limit(
         )
 
     return claims
+
+
+def require_passport_with_cost_cap(capability: str):
+    """B.9 — factory that returns a dependency gating on rate-limit AND
+    monthly USD budget. Routes use it like:
+
+        @router.post("/search", ...)
+        async def web_search(
+            ...,
+            claims: PassportClaims = Depends(require_passport_with_cost_cap("web.search")),
+        ): ...
+
+    The cost catalog lives in app/eii/cost_cap.py:COSTS — adding a new
+    capability there is enough; routes opt-in by passing the capability
+    name to this factory.
+    """
+    async def _dep(
+        request: Request,
+        response: Response,
+        claims: PassportClaims = Depends(require_passport_with_eii_rate_limit),
+    ) -> PassportClaims:
+        settings = get_settings()
+        redis = getattr(request.app.state, "redis", None)
+        decision = await cost_cap.charge(
+            redis,
+            passport=claims.passport,
+            capability=capability,
+            cap_usd=settings.monthly_cost_cap_usd_default,
+            warning_pct=settings.monthly_cost_warning_pct,
+        )
+
+        response.headers["X-Cost-Cap-USD"] = f"{decision.cap_microcents / cost_cap.MICROCENTS_PER_USD:.2f}"
+        response.headers["X-Cost-Used-USD"] = f"{decision.used_after / cost_cap.MICROCENTS_PER_USD:.6f}"
+        response.headers["X-Cost-Capability"] = capability
+        if decision.warning:
+            response.headers["X-Cost-Warning"] = (
+                f"Crossed {int(settings.monthly_cost_warning_pct * 100)}% of monthly budget"
+            )
+
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Monthly budget exhausted (cap "
+                    f"${decision.cap_microcents / cost_cap.MICROCENTS_PER_USD:.2f}). "
+                    f"Resets on the 1st."
+                ),
+                headers={
+                    "Retry-After": "86400",
+                    "X-Cost-Cap-USD": f"{decision.cap_microcents / cost_cap.MICROCENTS_PER_USD:.2f}",
+                    "X-Cost-Used-USD": f"{decision.used_after / cost_cap.MICROCENTS_PER_USD:.6f}",
+                    "X-Cost-Capability": capability,
+                },
+            )
+
+        return claims
+
+    return _dep

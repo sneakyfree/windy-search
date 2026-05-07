@@ -53,14 +53,15 @@ class StubScoreCache:
 
 
 class FakeRedisB3:
-    """Minimal redis stub supporting the sliding-window rate-limit ops.
-
-    zremrangebyscore + zadd + zcard + expire — ZADD with a unique member
-    per call so repeated calls inside the same millisecond still count
-    independently."""
+    """Minimal redis stub supporting the ops B.3 + B.9 use:
+    - sliding-window rate limit: zremrangebyscore + zadd + zcard + expire
+      (in a pipeline; ZADD with unique member per call)
+    - cost cap: incrby + expire (top-level)
+    """
 
     def __init__(self) -> None:
         self._zsets: dict[str, dict[str, float]] = {}
+        self._strings: dict[str, int] = {}
 
     async def ping(self) -> bool:
         return True
@@ -70,6 +71,13 @@ class FakeRedisB3:
 
     def pipeline(self) -> "FakeRedisPipelineB3":
         return FakeRedisPipelineB3(self)
+
+    async def incrby(self, key: str, delta: int) -> int:
+        self._strings[key] = self._strings.get(key, 0) + int(delta)
+        return self._strings[key]
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        return True
 
 
 class FakeRedisPipelineB3:

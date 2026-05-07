@@ -14,7 +14,10 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.auth.dependencies import require_passport_with_eii_rate_limit
+from app.auth.dependencies import (
+    require_passport_with_cost_cap,
+    require_passport_with_eii_rate_limit,
+)
 from app.auth.ept import PassportClaims
 from app.config import get_settings
 from app.eternitas_client import EternitasClient
@@ -52,7 +55,7 @@ class SearchResponseModel(BaseModel):
 async def web_search(
     body: SearchRequest,
     request: Request,
-    claims: PassportClaims = Depends(require_passport_with_eii_rate_limit),
+    claims: PassportClaims = Depends(require_passport_with_cost_cap("web.search")),
 ) -> SearchResponseModel:
     """Run a web search via the configured backend (Brave → DDG fallback).
 
@@ -139,7 +142,7 @@ class FetchResponseModel(BaseModel):
 async def web_fetch(
     body: FetchRequest,
     request: Request,
-    claims: PassportClaims = Depends(require_passport_with_eii_rate_limit),
+    claims: PassportClaims = Depends(require_passport_with_cost_cap("web.fetch")),
 ) -> FetchResponseModel:
     """Fetch a URL on behalf of the agent. SSRF-hardened.
 
