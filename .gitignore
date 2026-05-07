@@ -1,0 +1,14 @@
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+dist/
+build/
+out/
+coverage/
+.env
+.env.production
+.env.production.bak.*
+deploy-prod/.env*
+*.bak
+.DS_Store
