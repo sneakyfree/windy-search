@@ -22,6 +22,7 @@ import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+from app import __version__
 from app.anthropic_client import AnthropicClient
 from app.auth.dependencies import (
     require_passport,
@@ -95,7 +96,7 @@ def create_app() -> FastAPI:
             "events upstream. Capabilities: search, fetch, browse, extract, "
             "research."
         ),
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
         docs_url="/docs",
         redoc_url="/redoc",
@@ -171,7 +172,7 @@ def create_app() -> FastAPI:
         return {
             "status": "ok",
             "service": settings.service_name,
-            "version": "0.1.0",
+            "version": __version__,
             "environment": settings.environment,
         }
 
