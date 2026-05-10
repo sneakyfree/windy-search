@@ -358,8 +358,8 @@ class ExtractRequest(BaseModel):
     )
     instruction: str | None = Field(default=None, max_length=2000)
 
-    class Config:
-        populate_by_name = True
+    # Pydantic v2 idiom — class-based Config is deprecated and removed in v3.
+    model_config = {"populate_by_name": True}
 
 
 class ExtractResponseModel(BaseModel):
