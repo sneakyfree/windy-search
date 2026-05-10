@@ -24,11 +24,17 @@ FROM python:3.12-slim AS runtime
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1001 appuser \
+    && useradd --system --uid 1001 --gid appuser --home /app --shell /sbin/nologin appuser
 
+# Site-packages + entrypoints stay root-owned and read-only at runtime.
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
-COPY app/ ./app/
+# App source is owned by the non-root runtime user.
+COPY --chown=appuser:appuser app/ ./app/
+
+USER appuser
 
 EXPOSE 8500
 
