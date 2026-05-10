@@ -64,10 +64,16 @@ class Settings(BaseSettings):
     monthly_cost_warning_pct: float = 0.80
 
     # --- CORS ------------------------------------------------------------
+    # Canonical hostnames per kit-army-config/canonical-domains.json v6.
+    # The formerly-used Word `app.*` subdomain is now in `banned[]` —
+    # canonical Word identity host is `account.windyword.ai`.
+    # `windymind.ai` was added 2026-05-10 as the BYOM intelligence layer
+    # (Platform 12) per ADR-010 §2.
     cors_origins: list[str] = Field(default_factory=lambda: [
         "https://windysearch.com",
         "https://www.windysearch.com",
-        "https://app.windyword.ai",
+        "https://account.windyword.ai",
+        "https://windymind.ai",
         "http://localhost:5173",
     ])
 
