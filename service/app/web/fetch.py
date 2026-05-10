@@ -30,9 +30,9 @@ from __future__ import annotations
 import logging
 import re
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass
 from ipaddress import ip_address, ip_network
-from typing import Callable, Optional
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -112,7 +112,7 @@ class FetchResponse:
     truncated: bool
 
 
-def validate_fetchable_url(url: str, *, resolver: Optional[Resolver] = None) -> None:
+def validate_fetchable_url(url: str, *, resolver: Resolver | None = None) -> None:
     """Raises UnsafeURLError if the URL would be unsafe to fetch."""
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -163,7 +163,7 @@ async def fetch_url(
     max_chars: int,
     offset: int,
     timeout_seconds: float = 10.0,
-    resolver: Optional[Resolver] = None,
+    resolver: Resolver | None = None,
 ) -> FetchResponse:
     """Fetch url with SSRF protection + manual redirect re-validation.
 

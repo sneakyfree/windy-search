@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# All jobs operate in service/ — that's where pyproject.toml + app/ + tests/
+# live. Repo-root files (.github, README, spec/) don't ship in the wheel.
+
+jobs:
+  lint:
+    name: Ruff lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: service
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - name: Install dependencies (incl. dev)
+        run: uv sync --all-extras
+      - name: Ruff check
+        run: uv run ruff check app/ tests/
+
+  test:
+    name: Pytest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: service
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - name: Install dependencies (incl. dev)
+        run: uv sync --all-extras
+      - name: Pytest
+        # Tests use the FakeRedis stub from conftest.py — no live redis
+        # service container is required at this milestone. When integration
+        # tests against a real engine land (M3+), add a `services:` block
+        # here with `redis:7-alpine`.
+        run: uv run pytest -v --tb=short
+
+  docker-build:
+    name: Docker build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build runtime image
+        run: docker build -t windy-search-api:ci-${{ github.sha }} ./service

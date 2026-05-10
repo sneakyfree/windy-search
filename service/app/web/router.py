@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -16,7 +15,6 @@ from pydantic import BaseModel, Field
 
 from app.auth.dependencies import (
     require_passport_with_cost_cap,
-    require_passport_with_eii_rate_limit,
 )
 from app.auth.ept import PassportClaims
 from app.config import get_settings
@@ -83,13 +81,12 @@ async def web_search(
     # is intentionally NOT in the key, so different agents share entries.
     cache_payload = {"query": body.query, "limit": body.limit}
     cached = await result_cache.get_cached(redis, "web.search", cache_payload)
-    cache_hit = False
     if cached is not None:
         # Refund the cost we charged in the dependency — cache hits don't
         # spend Brave credits so the cap should reflect reality.
         await cost_cap.refund(redis, claims.passport, "web.search")
 
-        eternitas: Optional[EternitasClient] = getattr(request.app.state, "eternitas_client", None)
+        eternitas: EternitasClient | None = getattr(request.app.state, "eternitas_client", None)
         posted = False
         if eternitas is not None:
             idem = f"search:{claims.passport}:{uuid.uuid4().hex}"
@@ -99,7 +96,11 @@ async def web_search(
                 dimension="reliability",
                 delta_hint=1,
                 source="windy-search",
-                context={"query_hash_prefix": body.query[:50], "backend": cached.get("backend", "cached"), "cache_hit": True},
+                context={
+                    "query_hash_prefix": body.query[:50],
+                    "backend": cached.get("backend", "cached"),
+                    "cache_hit": True,
+                },
                 idempotency_key=idem,
             )
             posted = post_resp is not None
@@ -134,7 +135,7 @@ async def web_search(
     }
     await result_cache.set_cached(redis, "web.search", cache_payload, cache_value)
 
-    eternitas: Optional[EternitasClient] = getattr(request.app.state, "eternitas_client", None)
+    eternitas: EternitasClient | None = getattr(request.app.state, "eternitas_client", None)
     posted = False
     if eternitas is not None:
         # Idempotency-Key prevents double-credit when this handler runs
@@ -226,7 +227,7 @@ async def web_fetch(
         sliced = body_full[body.offset:body.offset + body.max_chars]
         truncated = (body.offset + body.max_chars) < len(body_full)
 
-        eternitas: Optional[EternitasClient] = getattr(request.app.state, "eternitas_client", None)
+        eternitas: EternitasClient | None = getattr(request.app.state, "eternitas_client", None)
         posted = False
         if eternitas is not None:
             idem = f"fetch:{claims.passport}:{uuid.uuid4().hex}"
@@ -304,7 +305,7 @@ async def web_fetch(
         truncated=truncated,
     )
 
-    eternitas: Optional[EternitasClient] = getattr(request.app.state, "eternitas_client", None)
+    eternitas: EternitasClient | None = getattr(request.app.state, "eternitas_client", None)
     posted = False
     if eternitas is not None:
         idem = f"fetch:{claims.passport}:{uuid.uuid4().hex}"
@@ -417,7 +418,7 @@ async def web_extract(
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    eternitas: Optional[EternitasClient] = getattr(request.app.state, "eternitas_client", None)
+    eternitas: EternitasClient | None = getattr(request.app.state, "eternitas_client", None)
     posted = False
     if eternitas is not None:
         idem = f"extract:{claims.passport}:{uuid.uuid4().hex}"
@@ -429,7 +430,9 @@ async def web_extract(
             source="windy-search",
             context={
                 "url_host": _safe_host(body.url),
-                "schema_top_level_keys": list(body.extract_schema.get("properties", {}).keys())[:10],
+                "schema_top_level_keys": list(
+                    body.extract_schema.get("properties", {}).keys()
+                )[:10],
             },
             idempotency_key=idem,
         )

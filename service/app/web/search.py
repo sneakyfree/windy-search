@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 import httpx
 
@@ -34,7 +33,7 @@ async def search(
     query: str,
     limit: int,
     *,
-    brave_api_key: Optional[str],
+    brave_api_key: str | None,
     timeout_seconds: float = 8.0,
 ) -> SearchResponse:
     """Try Brave first when an API key is configured; fall back to DDG."""

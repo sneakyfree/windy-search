@@ -22,6 +22,7 @@ import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.anthropic_client import AnthropicClient
 from app.auth.dependencies import (
     require_passport,
     require_passport_with_eii_rate_limit,
@@ -29,7 +30,6 @@ from app.auth.dependencies import (
 from app.auth.ept import PassportClaims
 from app.auth.jwks import JWKSCache
 from app.config import get_settings
-from app.anthropic_client import AnthropicClient
 from app.eii.score_cache import IntegrityScoreCache
 from app.eii.tiers import tier_for_score
 from app.eternitas_client import EternitasClient

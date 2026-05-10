@@ -93,7 +93,15 @@ class FakeRedisB3:
             return v
         return str(v).encode()
 
-    async def set(self, key: str, value, ex: int | None = None, nx: bool = False, xx: bool = False, **_) -> bool | None:
+    async def set(
+        self,
+        key: str,
+        value,
+        ex: int | None = None,
+        nx: bool = False,
+        xx: bool = False,
+        **_,
+    ) -> bool | None:
         if nx and key in self._strings:
             return None
         if xx and key not in self._strings:

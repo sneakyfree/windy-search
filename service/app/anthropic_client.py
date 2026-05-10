@@ -21,7 +21,6 @@ or AWS Bedrock.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import httpx
 
@@ -38,7 +37,7 @@ ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20"
 class AnthropicClient:
     def __init__(
         self,
-        oauth_token: Optional[str],
+        oauth_token: str | None,
         model: str = "claude-sonnet-4-6",
         timeout_seconds: float = 30.0,
     ) -> None:

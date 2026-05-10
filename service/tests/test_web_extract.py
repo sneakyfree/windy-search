@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
 
 import pytest
 
 from tests.auth_helpers import sign_test_ept
 from tests.test_web_search import RecordingEternitasClient
-
 
 # ---- AnthropicClient unit ------------------------------------------
 
@@ -36,7 +34,7 @@ async def test_anthropic_client_messages_sends_correct_shape():
     """Verify Bearer auth, oauth-beta header, and the two-block system array."""
     import httpx
 
-    from app.anthropic_client import AnthropicClient, CLAUDE_CODE_GATE
+    from app.anthropic_client import CLAUDE_CODE_GATE, AnthropicClient
 
     captured: dict = {}
 

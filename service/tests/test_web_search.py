@@ -4,7 +4,6 @@ import pytest
 
 from tests.auth_helpers import sign_test_ept
 
-
 # ---- recorder helpers ------------------------------------------------
 
 
