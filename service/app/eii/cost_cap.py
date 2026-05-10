@@ -24,7 +24,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Optional
 
 import redis.asyncio as aioredis
 
@@ -75,7 +74,7 @@ def _key(passport: str) -> str:
 
 
 async def charge(
-    redis: Optional[aioredis.Redis],
+    redis: aioredis.Redis | None,
     passport: str,
     capability: str,
     cap_usd: float,
@@ -150,7 +149,7 @@ async def charge(
 
 
 async def refund(
-    redis: Optional[aioredis.Redis],
+    redis: aioredis.Redis | None,
     passport: str,
     capability: str,
 ) -> int:

@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Optional
 
 import httpx
 
@@ -88,7 +87,7 @@ class IntegrityScoreCache:
         finally:
             self._inflight.pop(passport, None)
 
-    def invalidate(self, passport: Optional[str] = None) -> None:
+    def invalidate(self, passport: str | None = None) -> None:
         """Drop a single passport (or the entire cache when None). The
         webhook subscriber will call this on `integrity.event`."""
         if passport is None:

@@ -20,7 +20,7 @@ nice-to-have, never load-bearing.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -33,7 +33,7 @@ class EternitasClient:
     def __init__(
         self,
         base_url: str,
-        platform_api_key: Optional[str],
+        platform_api_key: str | None,
         timeout_seconds: float = 5.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")

@@ -5,7 +5,6 @@ import pytest
 from tests.auth_helpers import sign_test_ept
 from tests.test_web_search import RecordingEternitasClient
 
-
 # ---- cost catalog + charge() unit tests ------------------------------
 
 
@@ -20,8 +19,8 @@ def test_cost_catalog_contains_known_capabilities():
 
 @pytest.mark.asyncio
 async def test_charge_under_cap_succeeds():
-    from tests.conftest import FakeRedisB3
     from app.eii.cost_cap import charge
+    from tests.conftest import FakeRedisB3
 
     redis = FakeRedisB3()
     decision = await charge(redis, "ET-X", "web.search", cap_usd=5.0, warning_pct=0.8)
@@ -34,8 +33,8 @@ async def test_charge_under_cap_succeeds():
 
 @pytest.mark.asyncio
 async def test_charge_accumulates_within_month():
-    from tests.conftest import FakeRedisB3
     from app.eii.cost_cap import charge
+    from tests.conftest import FakeRedisB3
 
     redis = FakeRedisB3()
     for _ in range(5):
@@ -48,8 +47,8 @@ async def test_charge_accumulates_within_month():
 
 @pytest.mark.asyncio
 async def test_charge_blocks_over_cap_and_rolls_back():
+    from app.eii.cost_cap import charge
     from tests.conftest import FakeRedisB3
-    from app.eii.cost_cap import MICROCENTS_PER_USD, charge
 
     redis = FakeRedisB3()
     # Cap = $0.001 = 1000 microcents → fits 2 web.search (1000 microcents)
@@ -71,8 +70,8 @@ async def test_charge_blocks_over_cap_and_rolls_back():
 
 @pytest.mark.asyncio
 async def test_charge_warning_at_threshold():
-    from tests.conftest import FakeRedisB3
     from app.eii.cost_cap import charge
+    from tests.conftest import FakeRedisB3
 
     redis = FakeRedisB3()
     # Cap = 1000 microcents, warning at 80% = 800. web.search costs 500.
@@ -141,8 +140,8 @@ async def test_search_blocks_when_budget_exhausted(
 ):
     """Manually inflate the cost counter past the cap, then verify a fresh
     search gets 429 with the budget detail."""
+    from app.eii.cost_cap import MICROCENTS_PER_USD, _key
     from app.main import app
-    from app.eii.cost_cap import _key, MICROCENTS_PER_USD
 
     app.state.eternitas_client = RecordingEternitasClient()
     _patch_search_backend(monkeypatch)
@@ -169,8 +168,8 @@ async def test_fetch_charged_against_same_budget(
     gated_client, ept_keypair, monkeypatch
 ):
     """Both /web/search and /web/fetch debit the same monthly counter."""
-    from app.main import app
     from app.eii.cost_cap import _key
+    from app.main import app
 
     app.state.eternitas_client = RecordingEternitasClient()
     _patch_search_backend(monkeypatch)
@@ -284,7 +283,7 @@ async def test_critical_tier_429_at_50_cents(gated_client, ept_keypair, monkeypa
 @pytest.mark.asyncio
 async def test_exceptional_tier_can_keep_going_past_5(gated_client, ept_keypair, monkeypatch):
     """Exceptional tier $50 cap means $5 of prior spend leaves plenty."""
-    from app.eii.cost_cap import _key, MICROCENTS_PER_USD
+    from app.eii.cost_cap import MICROCENTS_PER_USD, _key
     from app.main import app
 
     app.state.eternitas_client = RecordingEternitasClient()

@@ -5,14 +5,13 @@ import pytest
 from tests.auth_helpers import sign_test_ept
 from tests.test_web_search import RecordingEternitasClient
 
-
 # ---- result_cache primitives ----------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_cache_miss_returns_none():
-    from tests.conftest import FakeRedisB3
     from app.eii.result_cache import get_cached
+    from tests.conftest import FakeRedisB3
 
     redis = FakeRedisB3()
     result = await get_cached(redis, "web.search", {"query": "anything"})
@@ -21,8 +20,8 @@ async def test_cache_miss_returns_none():
 
 @pytest.mark.asyncio
 async def test_cache_set_then_get_round_trip():
-    from tests.conftest import FakeRedisB3
     from app.eii.result_cache import get_cached, set_cached
+    from tests.conftest import FakeRedisB3
 
     redis = FakeRedisB3()
     payload = {"query": "windy ecosystem", "limit": 5}
@@ -36,8 +35,8 @@ async def test_cache_set_then_get_round_trip():
 @pytest.mark.asyncio
 async def test_cache_namespaces_per_capability():
     """Same input under different capabilities → separate cache entries."""
-    from tests.conftest import FakeRedisB3
     from app.eii.result_cache import get_cached, set_cached
+    from tests.conftest import FakeRedisB3
 
     redis = FakeRedisB3()
     payload = {"x": 1}
@@ -63,8 +62,8 @@ async def test_cache_fails_open_when_redis_none():
 @pytest.mark.asyncio
 async def test_cost_refund_decrements_counter():
     """B.9.refund unwinds a charge so cap reflects real spend."""
-    from tests.conftest import FakeRedisB3
     from app.eii.cost_cap import _key, charge, refund
+    from tests.conftest import FakeRedisB3
 
     redis = FakeRedisB3()
     await charge(redis, "ET-X", "web.search", cap_usd=5.0, warning_pct=0.8)
@@ -111,8 +110,10 @@ async def test_search_first_call_populates_cache_second_call_hits(
     token2 = sign_test_ept(ept_keypair, passport="ET26-CACH-BBBB")  # different agent
 
     body = {"query": "windy", "limit": 5}
-    r1 = await gated_client.post("/web/search", headers={"Authorization": f"Bearer {token1}"}, json=body)
-    r2 = await gated_client.post("/web/search", headers={"Authorization": f"Bearer {token2}"}, json=body)
+    h1 = {"Authorization": f"Bearer {token1}"}
+    h2 = {"Authorization": f"Bearer {token2}"}
+    r1 = await gated_client.post("/web/search", headers=h1, json=body)
+    r2 = await gated_client.post("/web/search", headers=h2, json=body)
 
     assert r1.status_code == 200
     assert r2.status_code == 200
@@ -125,8 +126,8 @@ async def test_search_first_call_populates_cache_second_call_hits(
 
 @pytest.mark.asyncio
 async def test_search_cache_hit_refunds_cost(gated_client, ept_keypair, monkeypatch):
-    from app.main import app
     from app.eii.cost_cap import _key
+    from app.main import app
 
     app.state.eternitas_client = RecordingEternitasClient()
     _patch_search_backend(monkeypatch)

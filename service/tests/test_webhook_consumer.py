@@ -8,7 +8,6 @@ import json
 
 import pytest
 
-
 SECRET = "6a3cb74b7d85972b23511e6c5ce3dc59baf7aef5e4920b8745a6cd99a4b4ac90"
 
 

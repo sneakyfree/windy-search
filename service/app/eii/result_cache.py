@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import redis.asyncio as aioredis
 
@@ -50,7 +50,7 @@ def _key(capability: str, payload: dict[str, Any]) -> str:
 
 
 async def get_cached(
-    redis: Optional[aioredis.Redis],
+    redis: aioredis.Redis | None,
     capability: str,
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -72,7 +72,7 @@ async def get_cached(
 
 
 async def set_cached(
-    redis: Optional[aioredis.Redis],
+    redis: aioredis.Redis | None,
     capability: str,
     payload: dict[str, Any],
     value: dict[str, Any],
@@ -81,7 +81,11 @@ async def set_cached(
     """Store the value with the per-capability TTL. Best-effort."""
     if redis is None:
         return
-    ttl = ttl_seconds if ttl_seconds is not None else TTL_SECONDS.get(capability, DEFAULT_TTL_SECONDS)
+    ttl = (
+        ttl_seconds
+        if ttl_seconds is not None
+        else TTL_SECONDS.get(capability, DEFAULT_TTL_SECONDS)
+    )
     try:
         await redis.set(_key(capability, payload), json.dumps(value), ex=ttl)
     except Exception as e:

@@ -15,7 +15,6 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Optional
 
 import redis.asyncio as aioredis
 
@@ -37,7 +36,7 @@ def _key(passport: str) -> str:
 
 
 async def check(
-    redis: Optional[aioredis.Redis],
+    redis: aioredis.Redis | None,
     passport: str,
     limit_per_minute: int,
     tier_name: str,
