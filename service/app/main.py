@@ -34,6 +34,13 @@ from app.config import get_settings
 from app.eii.score_cache import IntegrityScoreCache
 from app.eii.tiers import tier_for_score
 from app.eternitas_client import EternitasClient
+from app.router import Router
+from app.sources.stubs import (
+    StubBraveSource,
+    StubGoogleSource,
+    StubOwnCorpusSource,
+)
+from app.v1.search import router as v1_router
 from app.web.router import router as web_router
 from app.webhooks.consumer import handle_event, verify_signature
 
@@ -79,6 +86,15 @@ async def lifespan(app: FastAPI):
         oauth_token=settings.anthropic_oauth_token,
         model=settings.anthropic_model,
     )
+
+    # M1.8 — canonical `/v1/search` router. Stubs only at M1; M2 swaps
+    # them for real Brave/Google/etc. bridges. Stateless; constructed
+    # once at lifespan, used per-request without locking.
+    app.state.search_router = Router([
+        StubOwnCorpusSource(),
+        StubBraveSource(),
+        StubGoogleSource(),
+    ])
 
     yield
 
@@ -234,6 +250,7 @@ def create_app() -> FastAPI:
         }
 
     app.include_router(web_router)
+    app.include_router(v1_router)
 
     return app
 
