@@ -239,3 +239,93 @@ async def test_v1_search_two_calls_have_different_ids(gated_client, ept_keypair)
         json={"query": "x"},
     )
     assert r1.json()["id"] != r2.json()["id"]
+
+
+# ---- M2.4 + M2.5 cost-cap integration ----
+
+# Test EPT subject claim — matches default in tests/auth_helpers.sign_test_ept.
+TEST_PASSPORT = "ET26-TEST-AAAA"
+
+
+@pytest.mark.asyncio
+async def test_v1_search_emits_cost_headers(gated_client, ept_keypair):
+    """Cost-cap dep emits X-Cost-{Cap-USD,Used-USD,Capability,Tier,Tier-Multiplier}
+    headers on every successful response."""
+    token = sign_test_ept(ept_keypair)
+    resp = await gated_client.post(
+        "/v1/search",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"query": "hello"},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["X-Cost-Capability"] == "v1.search"
+    assert "X-Cost-Cap-USD" in resp.headers
+    assert "X-Cost-Used-USD" in resp.headers
+    assert "X-Cost-Tier" in resp.headers
+    assert "X-Cost-Tier-Multiplier" in resp.headers
+
+
+@pytest.mark.asyncio
+async def test_v1_search_refunds_when_only_own_corpus_answered(
+    gated_client, ept_keypair
+):
+    """Own-corpus-only response → bridges_used == [] → cost refunded.
+
+    Verifies the spend counter ends at 0 after a sequence of own-corpus
+    calls — each pre-charge is offset by an equal refund."""
+    from app.eii.cost_cap import _key
+    from app.sources.stubs import StubOwnCorpusSource
+
+    app.state.search_router = Router([StubOwnCorpusSource()])
+    token = sign_test_ept(ept_keypair)
+
+    for _ in range(3):
+        resp = await gated_client.post(
+            "/v1/search",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"query": "x"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["stats"]["bridges_used"] == []
+
+    raw = await app.state.redis.get(_key(TEST_PASSPORT))
+    final = int(raw) if raw is not None else 0
+    assert final == 0, f"expected refund to net to 0 microcents, got {final}"
+
+
+@pytest.mark.asyncio
+async def test_v1_search_does_not_refund_when_bridges_used(
+    gated_client, ept_keypair
+):
+    """When a bridge contributed, the pre-charge stays — no refund."""
+    from app.eii.cost_cap import COSTS, _key
+    from app.sources.stubs import StubBraveSource
+
+    app.state.search_router = Router([StubBraveSource()])
+    token = sign_test_ept(ept_keypair)
+
+    resp = await gated_client.post(
+        "/v1/search",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"query": "x"},
+    )
+    assert resp.status_code == 200
+    assert "bridge:brave" in resp.json()["stats"]["bridges_used"]
+
+    raw = await app.state.redis.get(_key(TEST_PASSPORT))
+    final = int(raw) if raw is not None else 0
+    assert final == COSTS["v1.search"], (
+        f"expected counter at {COSTS['v1.search']} microcents (full charge, "
+        f"no refund), got {final}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_v1_search_capability_in_costs_catalog():
+    """Sanity: M2.4 added v1.search to the COSTS dict. Documenting it
+    here so it surfaces if someone removes it accidentally."""
+    from app.eii.cost_cap import COSTS
+
+    assert "v1.search" in COSTS
+    # $0.01 pessimistic — covers Brave + Google fan-out.
+    assert COSTS["v1.search"] == 1_000

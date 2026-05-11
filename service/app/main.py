@@ -35,11 +35,9 @@ from app.eii.score_cache import IntegrityScoreCache
 from app.eii.tiers import tier_for_score
 from app.eternitas_client import EternitasClient
 from app.router import Router
-from app.sources.stubs import (
-    StubBraveSource,
-    StubGoogleSource,
-    StubOwnCorpusSource,
-)
+from app.sources.brave import BraveSource
+from app.sources.google import GoogleSource
+from app.sources.stubs import StubOwnCorpusSource
 from app.v1.search import router as v1_router
 from app.web.router import router as web_router
 from app.webhooks.consumer import handle_event, verify_signature
@@ -87,13 +85,18 @@ async def lifespan(app: FastAPI):
         model=settings.anthropic_model,
     )
 
-    # M1.8 — canonical `/v1/search` router. Stubs only at M1; M2 swaps
-    # them for real Brave/Google/etc. bridges. Stateless; constructed
-    # once at lifespan, used per-request without locking.
+    # M2.6 — canonical `/v1/search` router. Real Brave + Google bridges
+    # plus the still-stubbed own-corpus reader (M3 brings the real reader).
+    # Sources with missing API keys stay dormant via `is_configured()=False`
+    # and the router skips them. Stateless; constructed once at lifespan,
+    # used per-request without locking.
     app.state.search_router = Router([
-        StubOwnCorpusSource(),
-        StubBraveSource(),
-        StubGoogleSource(),
+        StubOwnCorpusSource(),  # M3 brings the real reader
+        BraveSource(api_key=settings.brave_search_api_key),
+        GoogleSource(
+            api_key=settings.google_search_api_key,
+            cse_id=settings.google_cse_id,
+        ),
     ])
 
     yield
