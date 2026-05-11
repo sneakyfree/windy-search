@@ -25,6 +25,8 @@ import secrets
 import time
 from collections.abc import Sequence
 
+from app.dedup import dedup_across_sources
+from app.merge import apply_per_source_cap
 from app.normalization import normalize
 from app.sources.base import RawResult, Source
 from app.types import (
@@ -86,7 +88,23 @@ class Router:
             )
         )
 
-        merged = self._merge(active, raw_by_source, cap)
+        # Flatten + run the merge pipeline: dedup → per-source cap →
+        # final sort → slice. Each step is a separate module so M1.5
+        # (BM25 ranker) can swap _sort_pairs without disturbing the
+        # rest of the pipeline.
+        pairs: list[tuple[Source, RawResult]] = [
+            (source, raw)
+            for source, raws in zip(active, raw_by_source)
+            for raw in raws
+        ]
+        pairs = dedup_across_sources(pairs)
+        pairs = apply_per_source_cap(pairs, max_results=cap)
+        pairs = self._sort_pairs(pairs)
+
+        merged = [
+            normalize(raw, source, rank=i)
+            for i, (source, raw) in enumerate(pairs[:cap], start=1)
+        ]
         stats = self._stats(merged, t_start)
 
         return SearchResponse(
@@ -95,28 +113,20 @@ class Router:
             stats=stats,
         )
 
-    def _merge(
+    def _sort_pairs(
         self,
-        sources: Sequence[Source],
-        raw_by_source: Sequence[Sequence[RawResult]],
-        max_results: int,
-    ) -> list[SearchResult]:
-        """Priority-sorted concatenation, capped at `max_results`.
+        pairs: Sequence[tuple[Source, RawResult]],
+    ) -> list[tuple[Source, RawResult]]:
+        """Final ordering before slicing to `max_results`.
 
         Sort key: `(source.priority, raw.source_rank)`. Lower priority
-        wins; ties break by the source's original rank. M1.5 swaps this
-        for BM25; M1.6 adds dedup; M1.7 adds per-source caps.
+        wins; ties break by the source's original rank. M1.5 replaces
+        this with the BM25 ranker.
         """
-        pairs: list[tuple[Source, RawResult]] = []
-        for source, raws in zip(sources, raw_by_source):
-            for raw in raws:
-                pairs.append((source, raw))
-        pairs.sort(key=lambda p: (p[0].priority, p[1].source_rank or 1_000_000))
-
-        return [
-            normalize(raw, source, rank)
-            for rank, (source, raw) in enumerate(pairs[:max_results], start=1)
-        ]
+        return sorted(
+            pairs,
+            key=lambda p: (p[0].priority, p[1].source_rank or 1_000_000),
+        )
 
     def _stats(
         self,
