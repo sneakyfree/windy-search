@@ -28,6 +28,7 @@ from collections.abc import Sequence
 from app.dedup import dedup_across_sources
 from app.merge import apply_per_source_cap
 from app.normalization import normalize
+from app.privacy import rewrite_query
 from app.ranking import rank as bm25_rank
 from app.sources.base import RawResult, Source
 from app.types import (
@@ -82,9 +83,15 @@ class Router:
             )
 
         cap = request.max_results
+
+        # M1.9 — privacy proxy: strip PII before external bridges see the
+        # query. The ORIGINAL query stays in-process for the ranker so
+        # BM25 still scores against the user's intent.
+        sanitized_query, n_redactions = rewrite_query(request.query)
+
         raw_by_source: list[list[RawResult]] = list(
             await asyncio.gather(
-                *(_safe_search(source, request.query, cap) for source in active),
+                *(_safe_search(source, sanitized_query, cap) for source in active),
                 return_exceptions=False,  # _safe_search wraps internally
             )
         )
@@ -107,9 +114,27 @@ class Router:
             for i, (source, raw) in enumerate(pairs[:cap], start=1)
         ]
         stats = self._stats(merged, t_start)
+        request_id = _make_request_id()
+
+        # M1.10 — aggregate-only structured telemetry. NO query body, NO
+        # passport — per master plan §4 P6 + §6 M1.10. Log aggregators
+        # (Datadog/Grafana) roll these up over time without needing
+        # per-user keys.
+        logger.info(
+            "search.request",
+            extra={
+                "search_id": request_id,
+                "n_sources_called": len(active),
+                "n_sources_answered": sum(1 for raws in raw_by_source if raws),
+                "n_results_returned": len(merged),
+                "ms_total": stats.ms_total,
+                "bridges_used": [b.value for b in stats.bridges_used],
+                "privacy_redactions": n_redactions,
+            },
+        )
 
         return SearchResponse(
-            id=_make_request_id(),
+            id=request_id,
             results=merged,
             stats=stats,
         )
