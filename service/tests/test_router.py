@@ -222,3 +222,108 @@ async def test_router_handles_all_broken_sources():
     assert response.results == []
     assert response.stats.own_corpus_results == 0
     assert response.stats.bridge_results == 0
+
+
+# ---- M1.6 + M1.7 pipeline integration tests ----
+
+
+class _CollidingBraveSource(StubBraveSource):
+    """A Brave stub that returns the SAME urls as own-corpus would —
+    used to test cross-source dedup in the router."""
+
+    @property
+    def name(self) -> str:
+        return "_colliding_brave"
+
+    async def search(self, query, **opts):
+        from app.sources.base import RawResult
+        from app.sources.stubs import _deterministic_hash
+        h = _deterministic_hash(("own_corpus", query))
+        # First two URLs collide with StubOwnCorpusSource; third is unique.
+        return [
+            RawResult(
+                url=f"https://owncorpus.example/{h}/1",
+                title="dup",
+                snippet="dup",
+                source_rank=1,
+            ),
+            RawResult(
+                url=f"https://owncorpus.example/{h}/2",
+                title="dup",
+                snippet="dup",
+                source_rank=2,
+            ),
+            RawResult(
+                url="https://brave-only.example/x",
+                title="unique brave",
+                snippet="unique",
+                source_rank=3,
+            ),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_router_dedups_cross_source_duplicates():
+    """Brave returns 3 results; first 2 collide with own_corpus. After
+    dedup, only own_corpus's versions survive (lower priority wins);
+    Brave's unique third URL also survives. Total = 2 (own) + 1 (brave) = 3."""
+    router = Router([
+        StubOwnCorpusSource(),
+        _CollidingBraveSource(),
+    ])
+    response = await router.route(_req())
+    assert len(response.results) == 3
+    # First 2 are own_corpus (priority 0); third is brave's unique URL
+    sources = [r.provenance.source for r in response.results]
+    assert sources == [
+        BridgeSource.OWN_CORPUS,
+        BridgeSource.OWN_CORPUS,
+        BridgeSource.BRAVE,
+    ]
+    # Stats reflect the deduped final response — brave contributed 1
+    assert response.stats.own_corpus_results == 2
+    assert response.stats.bridge_results == 1
+    assert response.stats.bridges_used == [BridgeSource.BRAVE]
+
+
+class _ManyResultsStub(StubBraveSource):
+    """Returns 12 results — used to test the per-source cap binding."""
+
+    @property
+    def name(self) -> str:
+        return "_many_results"
+
+    async def search(self, query, **opts):
+        from app.sources.base import RawResult
+        return [
+            RawResult(
+                url=f"https://many.example/{i}",
+                title=f"many {i}",
+                snippet=f"many {i}",
+                source_rank=i,
+            )
+            for i in range(1, 13)
+        ]
+
+
+@pytest.mark.asyncio
+async def test_router_caps_single_source_contribution():
+    """With max_results=10 + default 0.7 fraction, per-source cap = 7.
+    A source that produces 12 contributes only 7 to the final list."""
+    router = Router([_ManyResultsStub()])
+    response = await router.route(_req(max_results=10))
+    assert len(response.results) == 7  # capped, not 10 and not 12
+
+
+@pytest.mark.asyncio
+async def test_router_dedup_then_cap_pipeline_ordering():
+    """Dedup runs BEFORE the per-source cap. If a colliding source has
+    12 results and 2 collide with own-corpus, the 10 surviving brave
+    results are then capped to 7."""
+    router = Router([
+        StubOwnCorpusSource(),  # 2 results, priority 0
+        _CollidingBraveSource(),  # 3 results, 2 collide → 1 survives dedup
+    ])
+    response = await router.route(_req(max_results=10))
+    # 2 own_corpus + 1 brave-unique = 3 total
+    assert len(response.results) == 3
