@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     # --- Search backends (B.4) -------------------------------------------
     brave_search_api_key: str | None = None  # falls back to DDG when None
 
+    # Google Custom Search (M2.2) — LAST-RESORT bridge per master plan §4
+    # P1. Requires BOTH a Custom Search JSON API key AND a Custom Search
+    # Engine ID. When either is missing, the GoogleSource stays dormant
+    # (is_configured()=False); the router skips it.
+    google_search_api_key: str | None = None
+    google_cse_id: str | None = None
+
     # --- B.6 Browserbase (deferred to its codon) -------------------------
     browserbase_api_key: str | None = None
     browserbase_project_id: str | None = None
