@@ -1,231 +1,185 @@
-# Windy Search Agent Protocol — v0.1 (DRAFT)
+# Windy Search Agent Protocol — v1.0
 
-> Status: drafting — captures the vision discussion from 2026-05-06. Subject to revision.
+> Status: **v1.0 — locked by master plan §5 + ADR-014.** Machine-readable companion at [`openapi-v1.yaml`](./openapi-v1.yaml).
 
 ## Scope
 
-This document specifies the HTTP wire protocol for the Windy Search v1 service: how an agent (or any Eternitas-credentialed caller) invokes web access tools and how authentication, rate limits, and audit logging interact.
+This document specifies the HTTP wire protocol for the Windy Search v1
+service: how an agent (or any Eternitas-credentialed caller) invokes web-
+access tools and how authentication, rate limits, audit logging, and
+privacy interact. The narrative here augments the OpenAPI spec — it
+captures the *why*; the YAML captures the *what*.
+
+## Stack & deploy targets
+
+- Service: Python 3.12 + FastAPI + Pydantic v2 (per ADR-013 marathon stack).
+- Production: `https://api.windysearch.com`.
+- Public marketing: `https://windysearch.com`.
 
 ## Authentication
 
-All requests carry an Eternitas Passport Token (EPT) in the Authorization header:
+All gated endpoints carry an Eternitas Passport Token (EPT) in the
+`Authorization` header as a Bearer JWT:
 
 ```
-Authorization: Eternitas <signed-EPT-JWT>
+Authorization: Bearer <signed-EPT-JWT>
 ```
 
-The EPT JWT is issued by Eternitas at agent hatch (or user signup). It carries:
-- `sub` — passport (e.g. `ET-XXXXX...` for agents, `EH-...` for humans)
-- `iss` — `eternitas.ai`
-- `iat`, `exp` — issued/expires
-- `ope` — owner operator (the human who controls this passport)
-- `bot` — bot name (for agent passports)
-- `typ` — bot type
-- `tru` — trust score (0-100, legacy, mirrored from EII overall)
-- `ver` — verification tier
-- `rev` — revocation status
-- `kid` — JWKS key ID for offline verification
+The EPT JWT is issued by Eternitas at agent hatch (or user signup). It
+carries the canonical claims (`sub`/passport, `iss`, `iat`, `exp`, `ope`,
+`bot`, `typ`, `tru`, `ver`, `rev`, `kid`).
 
-Verification: fetch `https://api.eternitas.ai/.well-known/eternitas-keys`, verify ES256 signature. Reject if `rev != null` or `exp` past.
+**Verification:** fetch
+`https://api.eternitas.ai/.well-known/eternitas-keys`, verify ES256
+signature. Reject if `rev != null` or `exp` past. The service caches the
+JWKS in process; key rotation is handled by `kid`.
 
 ## Endpoints (v1)
 
-### `POST /v1/web/search`
+The canonical agent-facing surface lives under `/v1/*`. Implementation
+currently lives at `/web/*` (B-codon legacy); M2 of the master plan will
+register the `/v1/*` aliases and deprecate `/web/*`.
 
-Search the open web. Returns top-N results.
+| Path | Implementation | Status |
+|---|---|---|
+| `POST /v1/search` | new in M1 router | 🔄 M1 |
+| `POST /v1/fetch` | alias for `/web/fetch` | 🟡 alias planned in M2 |
+| `POST /v1/browse` | not yet implemented | ⏳ M5 |
+| `POST /v1/extract` | alias for `/web/extract` | 🟡 alias planned in M2 |
+| `POST /v1/research` | composer over search+fetch | ⏳ M5+ |
 
-**Request:**
-```json
-{
-  "query": "Austin TX VA loan officer market 2024",
-  "num_results": 10
-}
-```
+See [`openapi-v1.yaml`](./openapi-v1.yaml) for the canonical request/
+response schemas. Below are the operational semantics that the YAML
+can't express.
 
-**Response:**
-```json
-{
-  "results": [
-    {
-      "url": "https://...",
-      "title": "...",
-      "snippet": "...",
-      "rank": 1
-    }
-  ],
-  "metadata": {
-    "backend": "brave",
-    "cost_usd": 0.003,
-    "ms_elapsed": 412
-  }
-}
-```
+### `POST /v1/search`
 
-### `POST /v1/web/fetch`
+**Preconditions:** valid EPT in `Authorization` header; EII passes
+per-minute rate limit; `query` non-empty, max 2000 chars.
 
-Download a URL; return clean readable text (no chrome, no nav).
+**Postconditions:** response carries `id` (prefix `srch_`), uniform-shape
+`results[]`, and a `stats` envelope including `bridges_used[]` (empty
+list = answered fully from own corpus — load-bearing KPI per master
+plan §4 P2 + §9). Best-effort integrity event posted upstream to
+Eternitas.
 
-**Request:**
-```json
-{
-  "url": "https://...",
-  "mode": "readability"
-}
-```
+**Routing:** the request fans out to the own corpus (M3+) and configured
+bridges in parallel. Bridge selection is biased by `agent_context.purpose`
+(e.g., `find_a_place` ⇒ Mapbox + OSM; `find_an_academic_paper` ⇒
+Semantic Scholar + arXiv). The router normalizes, deduplicates, and
+re-ranks before returning.
 
-**Response:**
-```json
-{
-  "url": "https://...",
-  "title": "...",
-  "text": "Clean article body...",
-  "links": ["https://..."],
-  "metadata": {
-    "fetched_at": "2026-05-06T...",
-    "ms_elapsed": 234
-  }
-}
-```
+**Idempotency:** not strictly idempotent. Bridge ordering and the cross-
+tenant cache state may produce different result sets between calls. The
+cache (TTL ~10 min) tends to return identical results for the same query
+within a short window — *useful but not a guarantee*.
 
-### `POST /v1/web/browse`
+**Privacy** (master plan §4 P6):
+- The query string is rewritten before being passed to bridges to strip
+  caller identifiers and anonymize geolocation hints.
+- Per-passport query history is NOT retained by default.
+- Aggregate telemetry (which bridges answered, p50/p99 latency, cache hit
+  rate) is retained for capacity planning; no per-user roll-up.
 
-Drive a real browser session — clicks, forms, screenshots. Used for sites that require interaction or block bare HTTP.
+### `POST /v1/fetch`
 
-**Request:**
-```json
-{
-  "url": "https://...",
-  "instructions": "Click the 'Sign In' button, fill the form with...",
-  "max_steps": 20
-}
-```
+SSRF-hardened single-URL fetch. Every redirect target is re-validated
+against the same denylist (private address space, link-local,
+metadata-service addresses). HTML is stripped to readable text where
+feasible.
 
-**Response:**
-```json
-{
-  "final_url": "https://...",
-  "screenshots": ["base64..."],
-  "actions_taken": [
-    { "step": 1, "action": "click", "target": "...", "result": "..." }
-  ],
-  "extracted_text": "...",
-  "metadata": {
-    "backend": "browserbase",
-    "cost_usd": 0.18,
-    "ms_elapsed": 14820
-  }
-}
-```
+**Pagination:** `offset` + `max_chars` lets agents page through a long
+document without re-paying the upstream fetch — the cache stores the
+full decoded body and re-slices.
 
-### `POST /v1/web/extract`
+### `POST /v1/browse`
 
-LLM-driven structured data extraction from a URL or screenshot.
+Hosted real-browser session (Browserbase). Step-sequenced actions:
+click, type, scroll, screenshot. **Not idempotent** — side effects on
+the target site are real.
 
-**Request:**
-```json
-{
-  "url": "https://...",
-  "schema": {
-    "name": "string",
-    "phone": "string",
-    "email": "string",
-    "specialties": "array<string>"
-  }
-}
-```
+### `POST /v1/extract`
 
-**Response:**
-```json
-{
-  "data": {
-    "name": "Bob LastName",
-    "phone": "+1...",
-    "email": "bob@...",
-    "specialties": ["VA", "FHA"]
-  },
-  "confidence": 0.87,
-  "metadata": {
-    "model": "claude-sonnet",
-    "cost_usd": 0.04
-  }
-}
-```
+LLM-driven structured extraction from a fetched page, schema-shaped.
+See `/v1/fetch` for the underlying pipeline.
 
-### `POST /v1/web/research`
+### `POST /v1/research`
 
-Higher-order composer: search + fetch top-N + synthesize. The "do my homework" endpoint.
-
-**Request:**
-```json
-{
-  "topic": "Austin TX loan officer market for VA loan specialists",
-  "depth": "comprehensive",
-  "max_sources": 10
-}
-```
-
-**Response:**
-```json
-{
-  "synthesis": "Long-form synthesis...",
-  "sources_consulted": [
-    { "url": "...", "title": "...", "weight": 0.34 }
-  ],
-  "metadata": {
-    "total_cost_usd": 0.42,
-    "ms_elapsed": 28430
-  }
-}
-```
+Composer over `/v1/search` + `/v1/fetch` + LLM synthesis. The
+"do my homework" endpoint. Streaming response (SSE) planned for M5+.
 
 ## Rate limiting (EII-aware)
 
-Every request consults the calling passport's Eternitas Integrity Index. Default per-tier policy:
+Every request consults the calling passport's Eternitas Integrity Index.
+Per-tier per-minute and per-month-USD budgets:
 
-| EII Range | Band | calls/min | calls/day (web.search) | calls/day (web.browse) |
-|---|---|---|---|---|
-| 900-1000 | Exceptional | 200 | 5000 | 1000 |
-| 750-899 | Good | 100 | 2000 | 500 |
-| 600-749 | Fair | 50 | 500 | 100 |
-| 400-599 | Poor (incl cold-start) | 20 | 100 | 20 |
-| <400 | Critical | 5 | 20 | 5 |
+| EII Range | Tier | calls/min | monthly cap (USD) |
+|---|---|---|---|
+| 900-1000 | Exceptional | 200 | $50 |
+| 700-899 | Trusted | 100 | $25 |
+| 500-699 | Developing (baseline) | 50 | $5 |
+| 400-499 | Watch | 20 | $2 |
+| <400 | Critical | 5 | $0.50 |
 
-Rate limit responses: `429 Too Many Requests` with `X-RateLimit-Reset` and `X-Eternitas-Score` headers.
+**Headers on every gated response:**
+- `X-Eternitas-Tier`, `X-Eternitas-Score`
+- `X-RateLimit-Limit`, `X-RateLimit-Count`
+- `X-Cost-Cap-USD`, `X-Cost-Used-USD`, `X-Cost-Capability`, `X-Cost-Tier`,
+  `X-Cost-Tier-Multiplier`
+
+**429 responses** carry `Retry-After` plus the same tier/cost headers so
+the caller can compute backoff without re-querying.
 
 ## Audit logging
 
-Every successful request POSTs an event to Eternitas:
+Every successful capability call posts an integrity event to Eternitas:
 
 ```
 POST https://api.eternitas.ai/api/v1/integrity/events
-Authorization: <Windy Search service API key>
-Body: {
+Authorization: <Windy Search platform API key>
+Body:
+{
   "passport": "ET-...",
-  "event": "web.search",
-  "outcome": "success",
+  "event_type": "web.search.completed",
   "dimension": "reliability",
   "delta_hint": +1,
   "source": "windy-search",
-  "idempotency_key": "..."
+  "context": { "query_hash_prefix": "...", "backend": "brave" },
+  "idempotency_key": "search:<passport>:<uuid>"
 }
 ```
 
-Failed requests log too (different dimension/delta).
+Failed calls log too (different dimension/delta — see master plan §4 P8
+"good bot operator brand" — graceful failures preserve trust).
 
-## Future: third-party platform reciprocity
+## Third-party platform reciprocity
 
 Sites that adopt the protocol can:
 
-1. Verify Windy passport signatures using Eternitas's public JWKS
-2. Honor agent traffic at the EII threshold of their choice
-3. Receive per-passport webhook subscriptions for trust-changes (`trust.changed` event already fires from Eternitas today)
+1. Verify Windy passport signatures using Eternitas's public JWKS.
+2. Honor agent traffic at the EII threshold of their choice (e.g., serve
+   uncached + non-rate-limited responses only to EII ≥ 700).
+3. Subscribe to per-passport `trust.changed` webhook events from
+   Eternitas so they can revoke access on demotion.
 
-This is the path to "Eternitas accepted everywhere." Windy Search is the first opinionated integration; the protocol is open.
+This is the path to "Eternitas accepted everywhere." Windy Search is the
+first opinionated integration; the protocol is open.
 
-## Open questions / TBD
+## Resolved questions (was: open)
 
-- Streaming responses for `web.research` (SSE? chunked?)
-- Per-tenant cost caps (prevent a single user's agent from runaway spend)
-- Result caching policy (private to passport vs cross-tenant via hash)
-- Spec-versioning policy (`/v1/...` vs Accept-Version header)
-- "Agent Mode" vs "User Mode" — does a human's EH passport have different rate limits than an agent's ET passport?
+- **Streaming responses for `/v1/research`** — SSE. M5+.
+- **Per-tenant cost caps** — implemented in `app/eii/cost_cap.py` (B.9).
+  Per-tier multiplier × `monthly_cost_cap_usd_default`.
+- **Result caching** — cross-tenant cache keyed on the request body
+  hash (not the passport). Refund cost on cache hit.
+- **Spec versioning** — path-based (`/v1/*`, `/v2/*`). No Accept-Version
+  header. Single major version supported at a time.
+- **Agent vs user passport rate limits** — same tier scale applies to
+  both ET and EH passports. EI score drives the tier; passport prefix
+  does not. Per master plan §4 + memory `project_windy_mobile_vision`
+  (identity inversion: credentialed = MORE access).
+
+## Still open
+
+_(None as of master plan §5 locking. Will accumulate again as M1 router
+work surfaces new questions.)_

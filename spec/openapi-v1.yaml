@@ -1,0 +1,507 @@
+openapi: 3.0.3
+
+info:
+  title: Windy Search v1
+  version: 1.0.0
+  description: |
+    **Agent-first web search.** Every endpoint requires a valid Eternitas
+    passport (EPT JWT). Results are uniform-shape across the own corpus and
+    bridge sources (Brave, Google, etc.) — agents do not branch on which
+    source answered their query; that's the router's job.
+
+    This spec is the public contract. The implementation lives at
+    `https://api.windysearch.com`. See `spec/agent-search-protocol.md` for
+    the narrative version (rate-limit policy, audit semantics, EII bands).
+
+    Per Windy Search master plan §5 + ADR-014.
+
+  contact:
+    name: Windy Ecosystem
+    url: https://windysearch.com
+
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.windysearch.com
+    description: Production
+  - url: http://localhost:8500
+    description: Local dev
+
+# ────────────────────────────────────────────────────────────────────────────
+# Tags
+# ────────────────────────────────────────────────────────────────────────────
+tags:
+  - name: search
+    description: Discover URLs answering a query.
+  - name: fetch
+    description: Retrieve content from a specific URL.
+  - name: browse
+    description: Drive a real browser session (interactions, screenshots).
+  - name: meta
+    description: Liveness, readiness, self-introspection.
+
+# ────────────────────────────────────────────────────────────────────────────
+# Paths
+# ────────────────────────────────────────────────────────────────────────────
+paths:
+
+  /v1/search:
+    post:
+      tags: [search]
+      summary: Search the open web
+      operationId: searchV1
+      description: |
+        Fan out the query across the own corpus and configured bridge
+        sources, then return a merged ranked list.
+
+        **Preconditions**
+          - `Authorization: Bearer <EPT JWT>` header present and valid.
+          - Caller's EII passes the per-tier rate-limit budget (see headers).
+          - `query` is non-empty, max 2000 chars.
+
+        **Postconditions**
+          - Response includes a request `id` (prefix `srch_`).
+          - Each result carries `_provenance.source` ∈ the BridgeSource enum.
+          - `stats.bridges_used` enumerates external bridges that contributed
+            (empty list = answered fully from own corpus).
+          - Best-effort integrity event posted upstream to Eternitas.
+
+        **Idempotency**
+          - Not strictly idempotent. Bridge ordering and cache state may
+            produce different result sets between calls. A cross-tenant
+            result cache (TTL ~10 min) tends to return identical results
+            for the same query in a short window, but this is NOT a
+            guarantee — agents that need stability MUST hash the response
+            themselves and re-query as needed.
+
+        **Privacy** (master plan §4 P6)
+          - Query text is rewritten before being passed to bridges to
+            strip caller identifiers and anonymize geolocation hints.
+          - Per-passport query history is NOT retained by default.
+
+      security:
+        - eternitasPassport: []
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SearchRequest' }
+            examples:
+              minimal:
+                summary: Minimal query
+                value:
+                  query: "Austin TX VA loan officer market 2024"
+              with-context:
+                summary: With agent context
+                value:
+                  query: "best coffee in fishtown"
+                  max_results: 5
+                  agent_context:
+                    purpose: find_a_place
+                    user_locale: en-US
+
+      responses:
+        '200':
+          description: Search succeeded.
+          headers:
+            X-Eternitas-Tier: { $ref: '#/components/headers/EternitasTier' }
+            X-Eternitas-Score: { $ref: '#/components/headers/EternitasScore' }
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Count: { $ref: '#/components/headers/RateLimitCount' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SearchResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '502': { $ref: '#/components/responses/UpstreamFailed' }
+        '503': { $ref: '#/components/responses/MisconfiguredService' }
+
+  /v1/fetch:
+    post:
+      tags: [fetch]
+      summary: Fetch a single URL
+      operationId: fetchV1
+      description: |
+        Retrieve the content at `url`. SSRF-hardened — all redirect targets
+        are re-validated; private address space (RFC1918, 169.254, etc.) is
+        refused even when reached via a redirect chain.
+
+        **Preconditions**
+          - `Authorization: Bearer <EPT JWT>` header present and valid.
+          - `url` resolves to a public IP after DNS + redirect chase.
+          - Caller's monthly cost cap not exhausted.
+
+        **Postconditions**
+          - Response body is the text content (HTML stripped to readable
+            text where the source allows).
+          - `final_url` reflects any redirect chain that occurred.
+          - `truncated=true` when the response was longer than `max_chars`.
+
+        **Idempotency**
+          - Idempotent at the protocol layer: same `url` at the same
+            moment will return the same content (modulo upstream churn).
+          - Cross-tenant cache (TTL ~10 min) serves repeated requests
+            without re-fetching.
+
+        **Status:** implementation lives at legacy `/web/fetch` today;
+        this `/v1/fetch` alias is the canonical V1 path. See
+        `x-implementation-status` below.
+
+      x-implementation-status: planned-alias-of-/web/fetch
+      x-status-note: |
+        The legacy `/web/fetch` endpoint is already shipped. M2 of the
+        master plan will register `/v1/fetch` as the canonical alias and
+        deprecate the `/web/*` prefix.
+
+      security:
+        - eternitasPassport: []
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FetchRequest' }
+
+      responses:
+        '200':
+          description: Fetched successfully.
+          headers:
+            X-Eternitas-Tier: { $ref: '#/components/headers/EternitasTier' }
+            X-Eternitas-Score: { $ref: '#/components/headers/EternitasScore' }
+            X-Cost-Cap-USD: { $ref: '#/components/headers/CostCapUSD' }
+            X-Cost-Used-USD: { $ref: '#/components/headers/CostUsedUSD' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FetchResponse' }
+        '400':
+          description: |
+            The URL failed SSRF checks (private IP, disallowed scheme, or
+            a redirect resolved to a forbidden target).
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '502': { $ref: '#/components/responses/UpstreamFailed' }
+        '503': { $ref: '#/components/responses/MisconfiguredService' }
+
+  /v1/browse:
+    post:
+      tags: [browse]
+      summary: Drive a real browser session
+      operationId: browseV1
+      description: |
+        Execute a series of browser interactions (click, type, scroll,
+        screenshot) using a hosted browser sandbox (Browserbase). Used for
+        sites that require JavaScript execution, login flows, or block
+        bare HTTP fetches.
+
+        **Preconditions**
+          - `Authorization: Bearer <EPT JWT>` header present and valid.
+          - Caller's monthly cost cap not exhausted (browse is the most
+            expensive capability — single invocation ~$0.10–$1.00).
+
+        **Postconditions**
+          - Returns ordered list of `actions_taken[]` with per-step
+            outcome.
+          - `final_url` and optional `screenshots[]` available.
+
+        **Idempotency**
+          - NOT idempotent. Side-effects on the target site are real
+            (form submissions, etc.). Agents must guard with their own
+            request deduplication when calling browse.
+
+        **Status:** not yet implemented. M5 ships the real backend
+        (Browserbase wrapper). This spec describes the V1 contract so
+        agent code can be written against the wire shape before the
+        endpoint is live.
+
+      x-implementation-status: planned-for-m5
+
+      security:
+        - eternitasPassport: []
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BrowseRequest' }
+
+      responses:
+        '200':
+          description: Browser session completed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BrowseResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '501':
+          description: Endpoint not yet implemented (pre-M5).
+        '502': { $ref: '#/components/responses/UpstreamFailed' }
+        '503': { $ref: '#/components/responses/MisconfiguredService' }
+
+  /health:
+    get:
+      tags: [meta]
+      summary: Liveness probe
+      operationId: health
+      description: |
+        Always 200 unless the process is dead. Does NOT require auth.
+      security: []
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  service: { type: string, example: windy-search }
+                  version: { type: string, example: "0.1.0" }
+                  environment: { type: string, example: production }
+
+# ────────────────────────────────────────────────────────────────────────────
+# Components
+# ────────────────────────────────────────────────────────────────────────────
+components:
+
+  securitySchemes:
+    eternitasPassport:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        ES256-signed Eternitas Passport Token issued by `api.eternitas.ai`.
+        JWKS at `https://api.eternitas.ai/.well-known/eternitas-keys`.
+        Per memory `reference_anthropic_oauth_gate` + master plan §5.
+
+  schemas:
+
+    BridgeSource:
+      type: string
+      description: |
+        The source that produced a result. `own_corpus` is the Windy Search
+        index; `bridge:*` values are external sources fronted by the router.
+      enum:
+        - own_corpus
+        - bridge:brave
+        - bridge:google
+        - bridge:mapbox
+        - bridge:osm
+        - bridge:github
+        - bridge:stackexchange
+        - bridge:semantic_scholar
+        - bridge:arxiv
+        - bridge:youtube
+
+    Provenance:
+      type: object
+      description: Per-result origin metadata.
+      required: [source]
+      properties:
+        source: { $ref: '#/components/schemas/BridgeSource' }
+        indexed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: ISO-8601 timestamp when own-corpus indexed this URL.
+        fetched_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: ISO-8601 timestamp when this bridge response reached us.
+        domain_ei:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          nullable: true
+          description: Eternitas Integrity score for the result's domain.
+        agent_friendliness_score:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          nullable: true
+          description: Per-domain agent-friendliness signal. 0=hostile, 1=ideal.
+
+    AgentContext:
+      type: object
+      description: Optional contextual hints from the calling agent.
+      properties:
+        purpose:
+          type: string
+          maxLength: 200
+          nullable: true
+          description: Free-form intent label. Used as a routing hint only.
+        user_locale:
+          type: string
+          maxLength: 20
+          nullable: true
+          description: BCP-47 locale tag (e.g., 'en-US').
+
+    SearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string, minLength: 1, maxLength: 2000 }
+        max_results: { type: integer, minimum: 1, maximum: 50, default: 10 }
+        agent_context: { $ref: '#/components/schemas/AgentContext' }
+
+    SearchResult:
+      type: object
+      required: [url, title, snippet, rank, _provenance]
+      properties:
+        url: { type: string, minLength: 1, maxLength: 2048 }
+        title: { type: string, maxLength: 500 }
+        snippet: { type: string, maxLength: 2000 }
+        rank:
+          type: integer
+          minimum: 1
+          description: 1-indexed final rank in the merged response.
+        _provenance: { $ref: '#/components/schemas/Provenance' }
+
+    SearchStats:
+      type: object
+      required: [own_corpus_results, bridge_results, bridges_used, ms_total]
+      properties:
+        own_corpus_results: { type: integer, minimum: 0 }
+        bridge_results: { type: integer, minimum: 0 }
+        bridges_used:
+          type: array
+          items: { $ref: '#/components/schemas/BridgeSource' }
+        ms_total: { type: integer, minimum: 0 }
+
+    SearchResponse:
+      type: object
+      required: [id, results, stats]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          example: srch_abc123
+          description: Opaque request id, prefix `srch_`.
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/SearchResult' }
+        stats: { $ref: '#/components/schemas/SearchStats' }
+
+    FetchRequest:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, format: uri, minLength: 8, maxLength: 2048 }
+        max_chars: { type: integer, minimum: 1, default: 5000 }
+        offset: { type: integer, minimum: 0, default: 0 }
+
+    FetchResponse:
+      type: object
+      required: [url, final_url, status_code, content, total_chars, truncated]
+      properties:
+        url: { type: string, format: uri }
+        final_url:
+          type: string
+          format: uri
+          description: After redirect chase.
+        status_code: { type: integer }
+        content_type: { type: string }
+        content: { type: string }
+        total_chars: { type: integer, minimum: 0 }
+        offset: { type: integer, minimum: 0 }
+        max_chars: { type: integer, minimum: 1 }
+        truncated: { type: boolean }
+
+    BrowseRequest:
+      type: object
+      required: [url, instructions]
+      properties:
+        url: { type: string, format: uri }
+        instructions:
+          type: string
+          maxLength: 4000
+          description: Natural-language description of what to do.
+        max_steps: { type: integer, minimum: 1, maximum: 50, default: 20 }
+
+    BrowseAction:
+      type: object
+      required: [step, action, result]
+      properties:
+        step: { type: integer, minimum: 1 }
+        action:
+          type: string
+          enum: [click, type, scroll, navigate, screenshot, wait]
+        target: { type: string, nullable: true }
+        result: { type: string }
+
+    BrowseResponse:
+      type: object
+      required: [final_url, actions_taken]
+      properties:
+        final_url: { type: string, format: uri }
+        actions_taken:
+          type: array
+          items: { $ref: '#/components/schemas/BrowseAction' }
+        screenshots:
+          type: array
+          description: Base64-encoded PNGs.
+          items: { type: string }
+        extracted_text: { type: string, nullable: true }
+
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail: { type: string, description: Human-readable failure reason. }
+
+  responses:
+    Unauthorized:
+      description: |
+        Missing or invalid EPT. The `WWW-Authenticate` header conveys the
+        expected scheme.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RateLimited:
+      description: |
+        Caller's per-minute or per-month budget exhausted. `Retry-After`
+        and the rate/cost headers indicate when to retry.
+      headers:
+        Retry-After:
+          schema: { type: string }
+          description: Seconds (or HTTP-date) until the budget refreshes.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UpstreamFailed:
+      description: A downstream bridge or fetched URL failed.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    MisconfiguredService:
+      description: |
+        The service is missing required runtime state (e.g., JWKS cache
+        not initialized). Returned in place of 401 so deployments can tell
+        client auth failures from server misconfiguration.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  headers:
+    EternitasTier:
+      description: Caller's current EII tier (exceptional|trusted|developing|watch|critical).
+      schema: { type: string }
+    EternitasScore:
+      description: Caller's current EII score (0–1000), cached up to 5 minutes.
+      schema: { type: integer }
+    RateLimitLimit:
+      description: Requests-per-minute budget for this tier.
+      schema: { type: integer }
+    RateLimitCount:
+      description: Requests observed in the current 60-second window.
+      schema: { type: integer }
+    CostCapUSD:
+      description: Monthly USD cap for this passport's tier.
+      schema: { type: string }
+    CostUsedUSD:
+      description: USD spent against the cap this month (after this call).
+      schema: { type: string }
