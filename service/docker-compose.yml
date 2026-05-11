@@ -21,6 +21,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Deployment-identity build args, surfaced via GET /version (MF1).
+        # Deploy pipeline exports these before `docker compose up`;
+        # empty defaults keep local builds working without ceremony.
+        COMMIT_SHA: ${COMMIT_SHA:-}
+        BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-}
     image: windy-search-api:local
     restart: unless-stopped
     env_file:
