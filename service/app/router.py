@@ -28,6 +28,7 @@ from collections.abc import Sequence
 from app.dedup import dedup_across_sources
 from app.merge import apply_per_source_cap
 from app.normalization import normalize
+from app.ranking import rank as bm25_rank
 from app.sources.base import RawResult, Source
 from app.types import (
     BridgeSource,
@@ -99,7 +100,7 @@ class Router:
         ]
         pairs = dedup_across_sources(pairs)
         pairs = apply_per_source_cap(pairs, max_results=cap)
-        pairs = self._sort_pairs(pairs)
+        pairs = self._sort_pairs(pairs, request.query)
 
         merged = [
             normalize(raw, source, rank=i)
@@ -116,17 +117,16 @@ class Router:
     def _sort_pairs(
         self,
         pairs: Sequence[tuple[Source, RawResult]],
+        query: str,
     ) -> list[tuple[Source, RawResult]]:
         """Final ordering before slicing to `max_results`.
 
-        Sort key: `(source.priority, raw.source_rank)`. Lower priority
-        wins; ties break by the source's original rank. M1.5 replaces
-        this with the BM25 ranker.
+        M1.5: BM25(title + snippet, query) × source_priority_weight.
+        Stable on ties — preserves input order (which dedup + cap
+        preserved from the original fan-out order, which itself was
+        source-priority order from the constructor).
         """
-        return sorted(
-            pairs,
-            key=lambda p: (p[0].priority, p[1].source_rank or 1_000_000),
-        )
+        return bm25_rank(pairs, query)
 
     def _stats(
         self,
