@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from app import __version__ as _PACKAGE_VERSION
+from app import __version__
 
 router = APIRouter(tags=["health"])
 
@@ -46,7 +46,7 @@ async def get_version() -> VersionInfo:
     commit_sha = os.getenv("COMMIT_SHA") or None
     return VersionInfo(
         service="windy-search-api",
-        version=_PACKAGE_VERSION,
+        version=__version__,
         commit_sha=commit_sha,
         commit_sha_short=commit_sha[:7] if commit_sha else None,
         build_timestamp=os.getenv("BUILD_TIMESTAMP") or None,

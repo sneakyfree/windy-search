@@ -35,10 +35,10 @@ from app.eii.score_cache import IntegrityScoreCache
 from app.eii.tiers import tier_for_score
 from app.eternitas_client import EternitasClient
 from app.router import Router
+from app.routes.version import router as version_router
 from app.sources.brave import BraveSource
 from app.sources.google import GoogleSource
 from app.sources.stubs import StubOwnCorpusSource
-from app.routes.version import router as version_router
 from app.v1.search import router as v1_router
 from app.web.router import router as web_router
 from app.webhooks.consumer import handle_event, verify_signature
