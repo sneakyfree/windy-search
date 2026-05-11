@@ -36,6 +36,14 @@ COPY --chown=appuser:appuser app/ ./app/
 
 USER appuser
 
+# Deployment-identity metadata, surfaced via GET /version (MF1).
+# Set by build pipeline. Empty defaults so local `docker build` without
+# --build-arg still produces a working image; /version reports nulls.
+ARG COMMIT_SHA=""
+ARG BUILD_TIMESTAMP=""
+ENV COMMIT_SHA=${COMMIT_SHA}
+ENV BUILD_TIMESTAMP=${BUILD_TIMESTAMP}
+
 EXPOSE 8500
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
