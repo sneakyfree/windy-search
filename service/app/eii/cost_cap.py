@@ -47,6 +47,10 @@ COSTS: dict[str, int] = {
     "web.browse":  50_000,     # $0.05
     "web.extract": 20_000,     # $0.02
     "web.research": 75_000,    # $0.075 — search + fetch + extract typical
+    # M2.4 — /v1/search fans out to up to 2 paid bridges (Brave + Google
+    # at $0.005 each). Charge pessimistically; the route handler refunds
+    # when `bridges_used` is empty (answered fully from own corpus).
+    "v1.search":   1_000,      # $0.01
 }
 
 KEY_PREFIX = "cost:windy-search:passport"
