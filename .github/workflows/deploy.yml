@@ -1,0 +1,71 @@
+name: Deploy
+
+# Marathon Foundation #13 — auto-deploy to the shared EC2 on every push to main.
+#
+# Pattern: lightweight in-place rebuild. The prod compose lives at
+# /opt/windy-search/deploy-prod/docker-compose.yml on EC2 (hand-curated,
+# NOT in repo) and already has build.args plumbed for COMMIT_SHA +
+# BUILD_TIMESTAMP (added 2026-05-12 per kit-army-config memory
+# `feedback_deploy_prod_inplace_pattern.md`). The workflow just exports
+# fresh env vars and rebuilds — the compose file stays where it is.
+#
+# Graceful degradation: if DEPLOY_HOST/USER/KEY secrets aren't set, the
+# workflow short-circuits with a warning instead of failing every push.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - name: Check auto-deploy is configured
+        id: check
+        env:
+          HAS_HOST: ${{ secrets.DEPLOY_HOST != '' }}
+          HAS_USER: ${{ secrets.DEPLOY_USER != '' }}
+          HAS_KEY:  ${{ secrets.DEPLOY_KEY != '' }}
+        run: |
+          if [[ "$HAS_HOST" == "true" && "$HAS_USER" == "true" && "$HAS_KEY" == "true" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Auto-deploy secrets configured; will deploy this commit."
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::DEPLOY_HOST/USER/KEY not configured; auto-deploy skipped."
+          fi
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
+    steps:
+      - name: Deploy to shared EC2 + verify /version
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          envs: GITHUB_SHA
+          script: |
+            set -euo pipefail
+            cd /opt/windy-search
+            sudo git fetch origin main --quiet
+            sudo git reset --hard origin/main
+            cd deploy-prod
+            export COMMIT_SHA="${GITHUB_SHA}"
+            export BUILD_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            sudo -E docker compose --env-file .env.production build search-api
+            sudo -E docker compose --env-file .env.production up -d --no-deps search-api
+            sleep 8
+            HOST_PORT=$(sudo docker port deploy-prod-search-api-1 | head -1 | awk -F: '{print $NF}')
+            DEPLOYED_SHA=$(curl -s "http://localhost:$HOST_PORT/version" | python3 -c "import sys,json; print(json.load(sys.stdin).get('commit_sha',''))")
+            if [[ "$DEPLOYED_SHA" == "$COMMIT_SHA" ]]; then
+              echo "✅ Deploy verified: /version shows ${DEPLOYED_SHA:0:7}"
+            else
+              echo "❌ Verification failed: /version shows '$DEPLOYED_SHA', expected '$COMMIT_SHA'"
+              exit 1
+            fi
