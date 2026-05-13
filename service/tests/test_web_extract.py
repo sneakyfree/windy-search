@@ -41,9 +41,12 @@ async def test_anthropic_client_messages_sends_correct_shape():
     async def handler(req: httpx.Request) -> httpx.Response:
         captured["headers"] = dict(req.headers)
         captured["body"] = json.loads(req.content)
-        return httpx.Response(200, json={
-            "content": [{"type": "text", "text": '{"answer": 42}'}],
-        })
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": '{"answer": 42}'}],
+            },
+        )
 
     transport = httpx.MockTransport(handler)
     import app.anthropic_client as ac_mod
@@ -169,7 +172,7 @@ async def test_extract_handles_bare_fence_no_lang():
 async def test_extract_includes_instruction_in_user_message():
     from app.web.extract import extract_structured_data
 
-    stub = _StubAnthropic(response_text='{}')
+    stub = _StubAnthropic(response_text="{}")
     await extract_structured_data(
         page_content="page",
         schema={"type": "object"},
@@ -198,6 +201,7 @@ def _patch_fetch_with_html(monkeypatch, html: str):
     async def fake_fetch(url, *, max_chars, offset, **kwargs):
         # Mirror real fetch's HTML-strip
         import re
+
         text = re.sub(r"<[^>]+>", " ", html)
         text = re.sub(r"\s+", " ", text).strip()
         return FetchResponse(
@@ -309,7 +313,7 @@ async def test_extract_400_on_unsafe_url(gated_client, ept_keypair, monkeypatch)
     from app.main import app
     from app.web.fetch import UnsafeURLError
 
-    app.state.anthropic_client = _StubAnthropic(response_text='{}')
+    app.state.anthropic_client = _StubAnthropic(response_text="{}")
 
     async def boom(url, **kwargs):
         raise UnsafeURLError("blocked")
@@ -344,3 +348,207 @@ async def test_extract_charges_correct_capability_cost(gated_client, ept_keypair
     assert resp.status_code == 200
     assert app.state.redis._strings[_key("ET26-COST-EXTR")] == 20_000
     assert resp.headers["X-Cost-Capability"] == "web.extract"
+
+
+# ---- Mind broker unit (ADR-022 §5 BYOM moat) ----------------------
+
+
+@pytest.mark.asyncio
+async def test_mind_broker_no_ept_returns_none(monkeypatch):
+    """Without ETERNITAS_PASSPORT_TOKEN, Mind broker is a no-op so
+    every existing caller keeps its previous behavior."""
+    from app.mind_broker import try_mind_broker
+
+    monkeypatch.delenv("ETERNITAS_PASSPORT_TOKEN", raising=False)
+    monkeypatch.delenv("ETERNITAS_PASSPORT", raising=False)
+
+    result = await try_mind_broker(system_prompt="x", user_message="y", max_tokens=100)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_mind_broker_success_returns_text(monkeypatch):
+    """200 with OpenAI-shaped response → returns choices[0].message.content
+    and sends the system+user pair with Bearer EPT to MIND_API_URL/v1/chat."""
+    import httpx
+
+    monkeypatch.setenv("ETERNITAS_PASSPORT_TOKEN", "ept-test-token")
+    monkeypatch.setenv("MIND_API_URL", "https://api.windymind.test")
+
+    captured: dict = {}
+
+    async def handler(req: httpx.Request) -> httpx.Response:
+        captured["url"] = str(req.url)
+        captured["headers"] = dict(req.headers)
+        captured["body"] = json.loads(req.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_1",
+                "model": "claude-sonnet-4-6",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Mind-text"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    import app.mind_broker as mb_mod
+
+    real = mb_mod.httpx.AsyncClient
+
+    def patched(*args, **kwargs):
+        kwargs.pop("timeout", None)
+        return real(transport=transport, timeout=5.0)
+
+    mb_mod.httpx.AsyncClient = patched
+    try:
+        result = await mb_mod.try_mind_broker(
+            system_prompt="sys", user_message="usr", max_tokens=123
+        )
+        assert result == "Mind-text"
+        assert captured["url"] == "https://api.windymind.test/v1/chat"
+        assert captured["headers"]["authorization"] == "Bearer ept-test-token"
+        assert captured["body"]["max_tokens"] == 123
+        assert captured["body"]["messages"][0] == {
+            "role": "system",
+            "content": "sys",
+        }
+        assert captured["body"]["messages"][1] == {
+            "role": "user",
+            "content": "usr",
+        }
+    finally:
+        mb_mod.httpx.AsyncClient = real
+
+
+@pytest.mark.asyncio
+async def test_mind_broker_non_200_returns_none(monkeypatch):
+    """Non-200 → returns None so caller falls through to direct chain."""
+    import httpx
+
+    monkeypatch.setenv("ETERNITAS_PASSPORT_TOKEN", "ept-test-token")
+
+    async def handler(req):
+        return httpx.Response(429, text="rate-limited")
+
+    transport = httpx.MockTransport(handler)
+    import app.mind_broker as mb_mod
+
+    real = mb_mod.httpx.AsyncClient
+
+    def patched(*args, **kwargs):
+        kwargs.pop("timeout", None)
+        return real(transport=transport, timeout=5.0)
+
+    mb_mod.httpx.AsyncClient = patched
+    try:
+        result = await mb_mod.try_mind_broker(system_prompt="x", user_message="y", max_tokens=100)
+        assert result is None
+    finally:
+        mb_mod.httpx.AsyncClient = real
+
+
+@pytest.mark.asyncio
+async def test_mind_broker_exception_returns_none(monkeypatch):
+    """httpx exception during call → returns None (caller falls through)."""
+    import httpx
+
+    monkeypatch.setenv("ETERNITAS_PASSPORT_TOKEN", "ept-test-token")
+
+    async def handler(req):
+        raise httpx.ConnectError("unreachable")
+
+    transport = httpx.MockTransport(handler)
+    import app.mind_broker as mb_mod
+
+    real = mb_mod.httpx.AsyncClient
+
+    def patched(*args, **kwargs):
+        kwargs.pop("timeout", None)
+        return real(transport=transport, timeout=5.0)
+
+    mb_mod.httpx.AsyncClient = patched
+    try:
+        result = await mb_mod.try_mind_broker(system_prompt="x", user_message="y", max_tokens=100)
+        assert result is None
+    finally:
+        mb_mod.httpx.AsyncClient = real
+
+
+@pytest.mark.asyncio
+async def test_mind_broker_unexpected_shape_returns_none(monkeypatch):
+    """200 but response shape lacks choices → returns None for graceful fall-through."""
+    import httpx
+
+    monkeypatch.setenv("ETERNITAS_PASSPORT_TOKEN", "ept-test-token")
+
+    async def handler(req):
+        return httpx.Response(200, json={"unexpected": "shape"})
+
+    transport = httpx.MockTransport(handler)
+    import app.mind_broker as mb_mod
+
+    real = mb_mod.httpx.AsyncClient
+
+    def patched(*args, **kwargs):
+        kwargs.pop("timeout", None)
+        return real(transport=transport, timeout=5.0)
+
+    mb_mod.httpx.AsyncClient = patched
+    try:
+        result = await mb_mod.try_mind_broker(system_prompt="x", user_message="y", max_tokens=100)
+        assert result is None
+    finally:
+        mb_mod.httpx.AsyncClient = real
+
+
+# ---- extract fall-through behavior --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_extract_uses_mind_when_available(monkeypatch):
+    """When try_mind_broker returns text, extract_structured_data
+    uses Mind's response; anthropic_client is not called."""
+    from app.web.extract import extract_structured_data
+
+    async def fake_try_mind(*, system_prompt, user_message, max_tokens=4000, **kw):
+        return '{"from": "mind"}'
+
+    monkeypatch.setattr("app.web.extract.try_mind_broker", fake_try_mind)
+
+    stub_anthropic = _StubAnthropic(response_text='{"from": "anthropic"}')
+    result = await extract_structured_data(
+        page_content="page",
+        schema={},
+        instruction=None,
+        anthropic_client=stub_anthropic,
+    )
+    assert result == {"from": "mind"}
+    assert stub_anthropic.last_call is None  # anthropic NOT called
+
+
+@pytest.mark.asyncio
+async def test_extract_falls_through_when_mind_returns_none(monkeypatch):
+    """When try_mind_broker returns None (no EPT, or Mind failed),
+    extract_structured_data falls through to anthropic_client."""
+    from app.web.extract import extract_structured_data
+
+    async def fake_try_mind(*, system_prompt, user_message, max_tokens=4000, **kw):
+        return None
+
+    monkeypatch.setattr("app.web.extract.try_mind_broker", fake_try_mind)
+
+    stub_anthropic = _StubAnthropic(response_text='{"from": "anthropic"}')
+    result = await extract_structured_data(
+        page_content="page",
+        schema={},
+        instruction=None,
+        anthropic_client=stub_anthropic,
+    )
+    assert result == {"from": "anthropic"}
+    assert stub_anthropic.last_call is not None  # anthropic WAS called

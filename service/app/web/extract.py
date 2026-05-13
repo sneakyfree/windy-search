@@ -7,6 +7,10 @@ arbitrary URLs.
 v1: text-based — we send Claude the HTML-stripped page content. Visual
 extraction (Claude vision over a Browserbase screenshot) lands as a
 B.7b codon once Phase B.6 (browse) is wired.
+
+Per ADR-022 §5 (BYOM moat), the LLM call attempts Windy Mind first
+when ETERNITAS_PASSPORT_TOKEN is configured (OPT-IN). Falls through
+to the direct Anthropic OAuth path on any Mind no-op / failure.
 """
 
 from __future__ import annotations
@@ -15,6 +19,8 @@ import json
 import logging
 import re
 from typing import Any
+
+from app.mind_broker import try_mind_broker
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +34,7 @@ EXTRACT_SYSTEM_PROMPT = (
     "Rules:\n"
     "- Output JSON ONLY. No prose, no markdown fences, no commentary.\n"
     "- Use null for fields genuinely absent from the content.\n"
-    "- Coerce types per the schema (e.g. number from \"$45.00\" → 45.00).\n"
+    '- Coerce types per the schema (e.g. number from "$45.00" → 45.00).\n'
     "- Don't fabricate values not supported by the content."
 )
 
@@ -66,21 +72,33 @@ async def extract_structured_data(
 ) -> dict[str, Any]:
     """Send page content + schema to Claude, return parsed JSON.
 
+    Routing (per ADR-022 §5 BYOM moat):
+      1. Try Windy Mind first when ETERNITAS_PASSPORT_TOKEN is set.
+      2. On Mind no-op (no EPT) or failure, fall through to the
+         direct Anthropic OAuth path via ``anthropic_client``.
+
     Raises RuntimeError on:
       - upstream Anthropic error (propagated message)
-      - Claude returns non-JSON we can't repair
+      - Claude / Mind returns non-JSON we can't repair
     """
     user_message = _build_user_message(page_content, schema, instruction)
-    raw = await anthropic_client.messages(
+
+    raw = await try_mind_broker(
         system_prompt=EXTRACT_SYSTEM_PROMPT,
         user_message=user_message,
         max_tokens=4000,
     )
+    if raw is None:
+        raw = await anthropic_client.messages(
+            system_prompt=EXTRACT_SYSTEM_PROMPT,
+            user_message=user_message,
+            max_tokens=4000,
+        )
+
     cleaned = _strip_fence(raw)
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as e:
         raise RuntimeError(
-            f"Claude returned non-JSON after fence-strip: {e}; "
-            f"first 200 chars: {cleaned[:200]!r}"
+            f"Claude returned non-JSON after fence-strip: {e}; first 200 chars: {cleaned[:200]!r}"
         )
