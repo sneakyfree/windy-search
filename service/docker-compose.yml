@@ -1,6 +1,9 @@
 # Local dev compose — bring up the service + Redis on a private network.
 # Mirrors eternitas's deploy-prod/docker-compose.yml shape so the
 # eventual prod compose file is a near-clone.
+#
+# Explicit project name per ADR-046 (compose project naming discipline).
+name: windysearch-dev
 
 services:
   search-redis:
