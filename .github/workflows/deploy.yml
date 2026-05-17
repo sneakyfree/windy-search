@@ -43,6 +43,44 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.configured == 'true'
     steps:
+      # MF13 precondition (per kit-army-config/docs/mf13-auto-deploy-
+      # precondition-2026-05-17.md): assert host is on main + ff-only-
+      # pullable BEFORE the `git reset --hard origin/main` deploy step.
+      - name: MF13 precondition — host on main, ff-only-pullable
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_KEY:  ${{ secrets.DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          TMPKEY=$(mktemp); printf '%s\n' "$DEPLOY_KEY" > "$TMPKEY"; chmod 600 "$TMPKEY"
+          trap "rm -f $TMPKEY" EXIT
+          OUTPUT=$(ssh -i "$TMPKEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+            "$DEPLOY_USER@$DEPLOY_HOST" "set -eo pipefail
+              cd /opt/windy-search
+              sudo git fetch origin main 2>/dev/null
+              echo BRANCH=\$(sudo git rev-parse --abbrev-ref HEAD)
+              echo HEAD=\$(sudo git rev-parse HEAD)
+              echo MAIN=\$(sudo git rev-parse origin/main)
+              echo IS_ANCESTOR=\$(sudo git merge-base --is-ancestor HEAD origin/main && echo yes || echo no)
+              echo DIRTY=\$(sudo git status --short | wc -l | tr -d ' ')")
+          echo "Probe:"; echo "$OUTPUT" | sed 's/^/  /'
+          BRANCH=$(echo "$OUTPUT" | grep '^BRANCH=' | cut -d= -f2)
+          IS_ANCESTOR=$(echo "$OUTPUT" | grep '^IS_ANCESTOR=' | cut -d= -f2)
+          DIRTY=$(echo "$OUTPUT" | grep '^DIRTY=' | cut -d= -f2)
+          if [[ "$BRANCH" != "main" ]]; then
+            echo "::error::MF13 precondition failed: host HEAD on '$BRANCH' (expected main). Runbook: kit-army-config/docs/branch-hygiene-policy-2026-05-17.md §2"
+            exit 1
+          fi
+          if [[ "$IS_ANCESTOR" != "yes" ]]; then
+            echo "::error::MF13 precondition failed: local main diverged from origin/main."
+            exit 1
+          fi
+          if [[ "$DIRTY" -gt 30 ]]; then
+            echo "::warning::Working tree has $DIRTY dirty files (>30). ADR-048 substrate violation."
+          fi
+          echo "MF13 precondition passed."
+
       - name: Deploy to shared EC2 + verify /version
         uses: appleboy/ssh-action@v1
         with:
