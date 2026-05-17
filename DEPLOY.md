@@ -237,10 +237,86 @@ CI runs all four on every PR (`.github/workflows/ci.yml`). Don't deploy from a b
 
 These land in the relevant phase:
 
-- **§12 (M3)** — own-corpus deploy: Postgres + Quickwit/Manticore/Vespa selection + WARC ingestion job topology.
-- **§13 (M4)** — JS-aware crawler: separate fleet of Browsertrix/Playwright workers + bandwidth budget guard + per-domain throttle.
-- **§14 (M5)** — Eternitas-EPT enforcement at scale: JWKS rotation drills, key-compromise runbook.
-- **§15 (M8)** — public launch: capacity planning, SLA monitoring, on-call rotation.
+- **§13 (M3)** — own-corpus deploy: Postgres + Quickwit/Manticore/Vespa selection + WARC ingestion job topology.
+- **§14 (M4)** — JS-aware crawler: separate fleet of Browsertrix/Playwright workers + bandwidth budget guard + per-domain throttle.
+- **§15 (M5)** — Eternitas-EPT enforcement at scale: JWKS rotation drills, key-compromise runbook.
+- **§16 (M8)** — public launch: capacity planning, full SLA monitoring stack, on-call rotation.
+
+---
+
+## 12. Observability, SLOs, and dependent services
+
+> **Why this section exists:** As of **2026-05-17**, `windy-agent` is the first downstream consumer that **hard-depends** on this service (see PR #187 there — `web_search`/`fetch_url` raise `RuntimeError` if `WINDY_SEARCH_BASE_URL` env is unset; the prior Brave-direct + DuckDuckGo fallbacks were deleted because they were duplicate of this service's own internal Brave→Google failover). An outage of `api.windysearch.com` now degrades every Windy Fly agent's web access. This section is the marathon-quality minimum: SLOs you can hold yourself to, current observability surface (small), and the alerting plan that lands when M8 capacity work begins.
+>
+> The full SLA-monitoring + on-call rotation stack is M8 scope (per §16); this section is the bridge between today (no external monitoring) and that target.
+
+### 12.1 Dependent services (who breaks if this service breaks)
+
+| Consumer | Repo | Path | Coupling | Blast radius if `api.windysearch.com` returns 5xx |
+|---|---|---|---|---|
+| **windy-agent (Windy Fly)** | `sneakyfree/windy-agent` | `src/windyfly/tools/web_search.py` | **HARD-GATED** since PR #187 (2026-05-17). `web_search` raises; `fetch_url` raises EXCEPT for the 5xx-rescue circuit breaker (direct httpx kicks in only when this service returns 5xx — keeps fetch_url functional during partial outages). | Agents can't search the web; fetch_url degrades to direct httpx (no SSRF protection, no cache, no audit). |
+| **windy-mind** | `sneakyfree/windy-mind` | `api/app/clients/windy_search.py` | Pre-wired client exists at startup but **no call site** — no `web_search` tool surfaced to LLM clients yet. Adding the tool is task #52. | None today; will inherit windy-agent's blast radius once Mind composes the tool. |
+| **windy-clone** | `sneakyfree/windy-clone` | `api/app/clients/windy_search.py` | Pre-wired client exists but **no call site** — reserved for future provider-research surfaces. | None today. |
+| **windy-pro account-server** | `sneakyfree/windy-pro` | `account-server/src/services/search/windy-search-client.ts` | Pre-wired TS client exists but **no call site**. | None today. |
+
+The pre-wired-but-unused clients mean the blast radius EXPANDS as we land tasks #52 and beyond — keep this table accurate.
+
+### 12.2 Current observability surface
+
+What we have today (2026-05-17):
+
+| Surface | Endpoint / Source | Polled by | Alert? |
+|---|---|---|---|
+| **MF1 `/version`** | `GET /version` → `{commit_sha, build_timestamp, environment, ...}` | kit-army-config deployed-state cron (every interval, logs to repo) | ❌ no alert — log-only |
+| **`/health`** | `GET /health` → `{status:"ok", service, version, environment}` | None automated | ❌ |
+| **`/health/ready`** | `GET /health/ready` → `{status:"ready", redis: true/false}` | None automated | ❌ |
+| **Structured logs** | `app.config` JSON logger; each `search.request` event includes `request_id`, `bridges_used`, `latency_ms` | Container stdout → docker logs (not shipped offsite) | ❌ |
+| **AWS CloudWatch** | EC2 host metrics — CPU, memory, disk, network | CloudWatch (default 5-min granularity) | ❌ no alarms configured |
+| **Per-passport cost cap** | Redis counter; `X-Cost-Used-USD` response header per call | Inline in the handler | ❌ — would log error to stdout if hit |
+
+**What we DON'T have:**
+- No external uptime monitor (UptimeRobot / Pingdom / similar)
+- No APM (Datadog / NewRelic / Sentry)
+- No log shipper (CloudWatch Logs / Loki / ELK)
+- No alerting channel (Slack / Telegram / PagerDuty)
+- No dashboard
+- No on-call rotation
+
+### 12.3 SLOs (targets to hold ourselves to, not customer-facing yet)
+
+These are aspirational while we're pre-revenue. They become contractual at M8 (public launch).
+
+| SLI | Target | Measurement window | Notes |
+|---|---|---|---|
+| **Availability** (HTTP 2xx/3xx rate for `/v1/search`) | **99.0%** | 30-day rolling | One Brave outage per month is the practical ceiling until Google failover is battle-tested. |
+| **Latency p99** (`/v1/search` end-to-end) | **< 3.0 s** | 7-day rolling | Provider call dominates; cache hits push p50 well under 100ms. |
+| **Latency p50** (`/v1/search`) | **< 700 ms** | 7-day rolling | Brave's median is ~400ms; rest is router + serialization. |
+| **Cache hit rate** | **≥ 30%** | 7-day rolling | Below this, the per-tenant cost cap is leakier than designed. |
+| **Provider failover recovery** | **< 2 s** added latency when Brave fails → Google takes over | 7-day rolling | If failover stalls, downstream consumers feel it as a transient outage. |
+| **Cost per 1k searches** | **< $5** | Monthly | Brave free tier (2000/mo) covers <50 searches/day; above that, Brave paid tier ($3 per 1000) + Google CSE costs apply. |
+
+### 12.4 Minimum-viable alerting (next, before M8)
+
+In priority order — these are cheap and would have caught most likely failure modes:
+
+1. **External uptime check.** Free UptimeRobot tier (no card required) hitting `https://api.windysearch.com/health` every 5 min with 2-failure alert threshold. Alert channel: Grant's email or Telegram (@Kit0Bot exists in the lockbox as a notification path). **Owner-action: create the UptimeRobot account; ~5 min.**
+2. **CloudWatch alarm on EC2 status check failure.** Free with AWS; alerts on instance-level failures (host kernel crash, EBS detach, etc.). Wire to SNS topic → email.
+3. **Brave key revocation detector.** Application-level: if 5 consecutive `/v1/search` calls return `provider: "windy-search-error"` with error matching `401` or `403`, log at WARN level and POST to `chat.windychat.ai/api/v1/push/notify` (the shared notification bus) so the alert lands on any registered admin device. **Code-side change; can ship in a follow-on PR.**
+4. **Cache-hit-rate floor.** When the rolling 1-hour cache hit rate drops below 10% (vs the 30% SLO), it usually means Redis is offline or the cache key namespace changed. Log + push-bus alert.
+
+### 12.5 Runbook entry points (placeholders to fill in over time)
+
+| Symptom | First check | Likely root cause |
+|---|---|---|
+| `api.windysearch.com` returns 5xx | `curl /health/ready` — Redis up? | Redis container crash → restart push-gateway compose project |
+| `/v1/search` returns `provider: "windy-search-error"` with HTTP 401/403 | Check Brave dashboard for key status | Brave key revoked; fall back to Google via env flip OR rotate Brave key (lockbox) |
+| `/v1/search` returns 429 | Caller's EII tier exhausted | Either bump tier in eternitas OR caller backs off |
+| `/version` `commit_sha` doesn't match expected | Deploy didn't actually update | Re-run `up -d --build --force-recreate` per §6 |
+| Both Brave AND Google return 5xx | Outage at both providers (rare) | Document with timestamps; consider transient mitigation (cache TTL extension) |
+
+### 12.6 Drift-prevention notes (ADR-048)
+
+This service does NOT yet have a SUBSTRATE.md (windy-mail and windy-clone do, per `~/kit-army-config/docs/adr-048-operational-substrate-as-code-2026-05-15.md`). Adding one is a follow-up to this PR — requires SSH probe of the production EC2 to capture live volume mounts, env values, container state. When written, it lives at `deploy/SUBSTRATE.md` and is verified by the kit-army-config T2.A drift detector nightly.
 
 ---
 
