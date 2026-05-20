@@ -99,7 +99,7 @@ jobs:
             sudo -E docker compose --env-file .env.production build search-api
             sudo -E docker compose --env-file .env.production up -d --no-deps search-api
             sleep 8
-            HOST_PORT=$(sudo docker port deploy-prod-search-api-1 | head -1 | awk -F: '{print $NF}')
+            HOST_PORT=$(sudo docker port windysearch-prod-search-api-1 | head -1 | awk -F: '{print $NF}')
             DEPLOYED_SHA=$(curl -s "http://localhost:$HOST_PORT/version" | python3 -c "import sys,json; print(json.load(sys.stdin).get('commit_sha',''))")
             if [[ "$DEPLOYED_SHA" == "$COMMIT_SHA" ]]; then
               echo "✅ Deploy verified: /version shows ${DEPLOYED_SHA:0:7}"
