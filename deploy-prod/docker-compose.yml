@@ -1,0 +1,83 @@
+# Explicit project name prevents directory-name-derived collisions on this
+# multi-service host where multiple /opt/<svc>/deploy-prod/ dirs would otherwise
+# all derive project name "deploy-prod". Migrated 2026-05-20 per
+# kit-army-config/docs/deploy-prod-collision-migration-runbook-2026-05-15.md.
+# container_name: declarations removed so auto-derive matches new project.
+name: windysearch-prod
+
+# Windy Search — production stack on the consolidated EC2 box.
+#
+# Co-located with eternitas + windy-mail + windy-pro on 54.88.113.79.
+# Per master plan B.11, this is the v1 deploy. windy-search itself is
+# stateless beyond Redis (rate-limit + cost-cap counters + result cache);
+# moving to its own infra is a future operational decision.
+#
+# Service-name prefix `search-` so we don't collide with eternitas
+# (`eter-`), windy-mail (`api`, `stalwart`), or windy-pro
+# (`pro-account-server`) on the shared `deploy_backend` docker network.
+
+services:
+  search-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - search-redis-data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  search-api:
+    build:
+      context: ../service
+      dockerfile: Dockerfile
+      args:
+        # MF1 deployment-identity; surfaced via GET /version
+        COMMIT_SHA: ${COMMIT_SHA:-}
+        BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-}
+    image: windy-search-api:local
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: "0.5"
+    env_file:
+      - .env.production
+    environment:
+      REDIS_URL: redis://search-redis:6379/0
+      ENVIRONMENT: production
+    depends_on:
+      search-redis:
+        condition: service_healthy
+    networks:
+      - backend
+    ports:
+      - "127.0.0.1:8510:8500"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8500/health > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+# Strategy A volume preservation: external reference to existing
+# deploy-prod_search-redis-data so project rename doesn't orphan rate-limit data.
+volumes:
+  search-redis-data:
+    external: true
+    name: deploy-prod_search-redis-data
+
+networks:
+  backend:
+    external: true
+    name: deploy_backend
