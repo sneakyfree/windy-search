@@ -3,7 +3,7 @@
 > **Agent-centric web access for the Windy ecosystem.**
 >
 > Domain: [windysearch.com](https://windysearch.com) (Cloudflare, registered 2026-05-06)
-> Status: foundation laid; v1 service in design
+> Status: **v0.1.0 service live in prod** at `api.windysearch.com` (M0–M2 shipped). See [Status](#status).
 
 ## What it is
 
@@ -103,12 +103,29 @@ Windy Search is product #10 in the Windy family:
 
 ## Status
 
+**The Phase 1 toolkit service is live in production** — `windy-search-service` v0.1.0,
+deployed at `api.windysearch.com` (co-located on the consolidated EC2; see `SUBSTRATE.md`).
+Milestones M0–M2 have shipped.
+
 - ✅ Domain registered (windysearch.com on Cloudflare)
 - ✅ Repo + scaffolding + canonical-domains lint vendored
-- ⏳ Service implementation (next)
-- ⏳ Eternitas event-ingestion integration
+- ✅ **M0 — service baseline live**: FastAPI service, EPT JWT verification via Eternitas
+  JWKS, EII-aware rate limits, `/health`, `/health/ready`, `/whoami`, `/integrity`, and a
+  `/version` endpoint (MF1 deployment identity)
+- ✅ **M1 — search pipeline**: source router with fan-out, dedup + cap, ranking, and
+  privacy normalization behind the canonical `POST /v1/search` endpoint
+- ✅ **M2 — real backends**: live Brave Search + Google adapters, per-passport cost caps,
+  and result caching
+- ✅ Eternitas event-ingestion integration (`POST /api/v1/integrity/events`)
+- ✅ Web toolkit endpoints: `POST /web/search`, `POST /web/fetch` (SSRF-hardened, Mozilla
+  Readability), `POST /web/extract` (LLM-driven structured extraction)
+- ⏳ `POST /v1/browse` and `POST /v1/research` (higher-order composition)
 - ⏳ Phase 2 Chrome extension
 - ⏳ Phase 3 standalone browser
+
+> Note: the canonical agent-facing search endpoint shipped as `POST /v1/search`. The
+> `/web/*` paths in the architecture/endpoint tables above reflect the original v1 spec and
+> remain the implemented toolkit surface for fetch/extract.
 
 ## License
 
