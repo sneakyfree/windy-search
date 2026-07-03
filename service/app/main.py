@@ -86,19 +86,24 @@ async def lifespan(app: FastAPI):
         model=settings.anthropic_model,
     )
 
-    # M2.6 — canonical `/v1/search` router. Real Brave + Google bridges
-    # plus the still-stubbed own-corpus reader (M3 brings the real reader).
-    # Sources with missing API keys stay dormant via `is_configured()=False`
-    # and the router skips them. Stateless; constructed once at lifespan,
-    # used per-request without locking.
-    app.state.search_router = Router([
-        StubOwnCorpusSource(),  # M3 brings the real reader
+    # M2.6 — canonical `/v1/search` router. Real Brave + Google bridges;
+    # sources with missing API keys stay dormant via `is_configured()=False`
+    # and the router skips them. Stateless; constructed once at lifespan.
+    sources = [
         BraveSource(api_key=settings.brave_search_api_key),
         GoogleSource(
             api_key=settings.google_search_api_key,
             cse_id=settings.google_cse_id,
         ),
-    ])
+    ]
+    # The own-corpus reader is still a STUB that fabricates results (M3 brings
+    # the real reader). Never serve fabricated results from production: an agent
+    # acting on invented URLs is worse off than one that gets an honest empty
+    # result — and the stub ranks its two fakes #1 even after real bridges are
+    # keyed. Keep it only outside production, for local/dev shape testing.
+    if settings.environment != "production":
+        sources.insert(0, StubOwnCorpusSource())
+    app.state.search_router = Router(sources)
 
     yield
 
