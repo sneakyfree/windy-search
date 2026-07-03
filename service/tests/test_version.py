@@ -65,3 +65,13 @@ async def test_version_in_openapi_spec(client):
     assert "/version" in spec["paths"]
     get_op = spec["paths"]["/version"]["get"]
     assert "health" in get_op.get("tags", [])
+
+
+@pytest.mark.asyncio
+async def test_security_headers_present(client):
+    """Defense-in-depth headers on every response (no CSP — /docs stays usable)."""
+    resp = await client.get("/version")
+    assert resp.headers.get("x-content-type-options") == "nosniff"
+    assert resp.headers.get("x-frame-options") == "DENY"
+    assert "max-age=" in (resp.headers.get("strict-transport-security") or "")
+    assert resp.headers.get("referrer-policy") == "strict-origin-when-cross-origin"

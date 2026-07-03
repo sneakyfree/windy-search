@@ -136,6 +136,21 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def _security_headers(request: Request, call_next):
+        """Defense-in-depth response headers. Deliberately NO Content-Security-
+        Policy: /docs (Swagger UI) is a public discovery surface and a strict
+        CSP would break it. setdefault so an upstream proxy's header wins.
+        """
+        response = await call_next(request)
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        return response
+
     @app.post("/webhooks", status_code=204, include_in_schema=False)
     async def webhooks_inbox(
         request: Request,
