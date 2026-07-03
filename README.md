@@ -114,8 +114,8 @@ Milestones M0–M2 have shipped.
   `/version` endpoint (MF1 deployment identity)
 - ✅ **M1 — search pipeline**: source router with fan-out, dedup + cap, ranking, and
   privacy normalization behind the canonical `POST /v1/search` endpoint
-- ✅ **M2 — real backends**: live Brave Search + Google adapters, per-passport cost caps,
-  and result caching
+- ✅ **M2 — real backends**: Brave Search + Google adapters built + wired (they go live once
+  their API keys are provisioned in prod), per-passport cost caps, and result caching
 - ✅ Eternitas event-ingestion integration (`POST /api/v1/integrity/events`)
 - ✅ Web toolkit endpoints: `POST /web/search`, `POST /web/fetch` (SSRF-hardened, Mozilla
   Readability), `POST /web/extract` (LLM-driven structured extraction)

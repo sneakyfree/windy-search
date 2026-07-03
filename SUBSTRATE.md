@@ -72,14 +72,13 @@ Redis (6379) is NOT host-bound — only reachable via the shared `deploy_backend
 - `REDIS_URL` (or use the in-network `redis://search-redis:6379/0`)
 - `ENVIRONMENT=production`
 
-**Required for bridge providers** (provider-specific keys — see ADR-014 §portfolio):
-- `BRAVE_API_KEY` (primary bridge)
-- `GOOGLE_*` (fallback bridge, costs per query)
-- Additional bridge keys per `service/app/bridges/`
+**Required for bridge providers** (provider-specific keys — see ADR-014 §portfolio). ⚠️ Use these EXACT names — `service/app/config.py` reads them verbatim, so a wrong name silently leaves the bridge dormant (`is_configured()=False`) and search returns empty:
+- `BRAVE_SEARCH_API_KEY` (primary bridge)
+- `GOOGLE_SEARCH_API_KEY` + `GOOGLE_CSE_ID` (fallback bridge, costs per query)
+- Additional bridge keys per `service/app/sources/`
 
 **Required for upstream auth:**
-- `WINDY_PRO_JWKS_URL` (humans authenticate via Pro JWKS RS256)
-- `ETERNITAS_JWKS_URL` (agents authenticate via Eternitas EPT)
+- `ETERNITAS_JWKS_URL` (agents authenticate via Eternitas EPT). The service is **EPT-only** — there is no human / Pro-JWKS auth path in the code.
 
 **MF1 deploy-identity (set by deploy workflow at build time):**
 - `COMMIT_SHA`
