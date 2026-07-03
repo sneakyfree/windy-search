@@ -6,8 +6,9 @@ B.4 ships /web/search. The same router will gain /web/fetch (B.5),
 
 from __future__ import annotations
 
+import hashlib
 import logging
-import uuid
+from datetime import UTC, datetime
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -31,6 +32,18 @@ from app.web.search import search
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/web", tags=["web"])
+
+
+def _idem_key(action: str, passport: str, subject: str) -> str:
+    """Deterministic idempotency key so a retried request doesn't double-post an
+    integrity event. Stable per (action, passport, subject) within a UTC day: a
+    retry after a network blip reuses the same key (Eternitas dedups it), while a
+    genuine repeat the next day gets a fresh one. Replaces a per-call uuid4 that
+    made every retry look like a distinct event.
+    """
+    digest = hashlib.sha256(subject.encode("utf-8")).hexdigest()[:16]
+    day = datetime.now(UTC).strftime("%Y-%m-%d")
+    return f"{action}:{passport}:{digest}:{day}"
 
 
 class SearchRequest(BaseModel):
@@ -89,7 +102,7 @@ async def web_search(
         eternitas: EternitasClient | None = getattr(request.app.state, "eternitas_client", None)
         posted = False
         if eternitas is not None:
-            idem = f"search:{claims.passport}:{uuid.uuid4().hex}"
+            idem = _idem_key("search", claims.passport, body.query)
             post_resp = await eternitas.submit_integrity_event(
                 passport=claims.passport,
                 event_type="web.search.completed",
@@ -141,7 +154,7 @@ async def web_search(
         # Idempotency-Key prevents double-credit when this handler runs
         # twice for the same (passport, query) within 24h — e.g., the
         # client retries after a network blip.
-        idem = f"search:{claims.passport}:{uuid.uuid4().hex}"
+        idem = _idem_key("search", claims.passport, body.query)
         post_resp = await eternitas.submit_integrity_event(
             passport=claims.passport,
             event_type="web.search.completed",
@@ -230,7 +243,7 @@ async def web_fetch(
         eternitas: EternitasClient | None = getattr(request.app.state, "eternitas_client", None)
         posted = False
         if eternitas is not None:
-            idem = f"fetch:{claims.passport}:{uuid.uuid4().hex}"
+            idem = _idem_key("fetch", claims.passport, body.url)
             post_resp = await eternitas.submit_integrity_event(
                 passport=claims.passport,
                 event_type="web.fetch.completed",
@@ -308,7 +321,7 @@ async def web_fetch(
     eternitas: EternitasClient | None = getattr(request.app.state, "eternitas_client", None)
     posted = False
     if eternitas is not None:
-        idem = f"fetch:{claims.passport}:{uuid.uuid4().hex}"
+        idem = _idem_key("fetch", claims.passport, body.url)
         post_resp = await eternitas.submit_integrity_event(
             passport=claims.passport,
             event_type="web.fetch.completed",
@@ -421,7 +434,7 @@ async def web_extract(
     eternitas: EternitasClient | None = getattr(request.app.state, "eternitas_client", None)
     posted = False
     if eternitas is not None:
-        idem = f"extract:{claims.passport}:{uuid.uuid4().hex}"
+        idem = _idem_key("extract", claims.passport, body.url)
         post_resp = await eternitas.submit_integrity_event(
             passport=claims.passport,
             event_type="web.extract.completed",
