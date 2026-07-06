@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     anthropic_oauth_token: str | None = None
     anthropic_model: str = "claude-sonnet-4-6"
 
+    # --- Windy Admin telemetry (ADR-WA-001) -------------------------------
+    # Central observability ingest. Same-box deploy reaches it over the
+    # shared docker network: http://admin-api:8900. Token name in the
+    # lockbox: WINDY_ADMIN_INGEST_TOKEN__WINDY_SEARCH. Both unset →
+    # telemetry is inert (dev default).
+    windy_admin_ingest_url: str | None = None
+    windy_admin_ingest_token: str | None = None
+
     # --- B.9 Cost caps ---------------------------------------------------
     monthly_cost_cap_usd_default: float = 5.0
     monthly_cost_warning_pct: float = 0.80

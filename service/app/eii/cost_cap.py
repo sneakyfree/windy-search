@@ -27,6 +27,8 @@ from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
 
+from app import telemetry
+
 logger = logging.getLogger(__name__)
 
 # 10^6 microcents = 1 USD. Lets us track $0.000001 increments without
@@ -67,6 +69,23 @@ class CostDecision:
     cost_charged: int
 
 
+def _emit_charge_event(passport: str, capability: str, cost: int, allowed: bool) -> None:
+    """Windy Admin ledger event for every budget decision (ADR-WA-001).
+
+    cost.charge = real backend spend; cost.denied = quota pressure
+    (429 signal). Deliberately inside cost_cap so every burn point —
+    route dependencies, browse top-ups, v1 pre-charges — is covered by
+    the one choke point. Fire-and-forget; never affects the decision.
+    """
+    telemetry.emit(
+        "cost.charge" if allowed else "cost.denied",
+        actor_type="agent",
+        actor_id=passport,
+        cost_microcents=cost if allowed else 0,
+        metadata={"capability": capability},
+    )
+
+
 def _current_month() -> str:
     """YYYY-MM in UTC. Calendar boundary, not rolling 30-day — simpler
     operationally; agents see their budget reset on the 1st."""
@@ -98,6 +117,7 @@ async def charge(
     cap_microcents = int(cap_usd * MICROCENTS_PER_USD)
 
     if redis is None:
+        _emit_charge_event(passport, capability, cost, allowed=True)
         return CostDecision(
             allowed=True,
             cap_microcents=cap_microcents,
@@ -117,6 +137,7 @@ async def charge(
         await redis.expire(key, 35 * 86400)
     except Exception as e:
         logger.warning("cost cap INCRBY failed for %s: %s", passport, e)
+        _emit_charge_event(passport, capability, cost, allowed=True)
         return CostDecision(
             allowed=True,
             cap_microcents=cap_microcents,
@@ -141,6 +162,7 @@ async def charge(
         except Exception:
             pass
 
+    _emit_charge_event(passport, capability, cost, allowed=allowed)
     return CostDecision(
         allowed=allowed,
         cap_microcents=cap_microcents,
@@ -172,7 +194,17 @@ async def refund(
         return 0
     key = _key(passport)
     try:
-        return int(await redis.incrby(key, -cost))
+        total = int(await redis.incrby(key, -cost))
     except Exception as e:
         logger.warning("cost refund failed for %s/%s: %s", passport, capability, e)
         return 0
+    # Ledger correction: dashboards compute net spend as
+    # sum(cost.charge) - sum(cost.refund).
+    telemetry.emit(
+        "cost.refund",
+        actor_type="agent",
+        actor_id=passport,
+        cost_microcents=cost,
+        metadata={"capability": capability},
+    )
+    return total
