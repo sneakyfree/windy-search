@@ -303,3 +303,189 @@ async def test_exceptional_tier_can_keep_going_past_5(gated_client, ept_keypair,
     # Exceptional has $50 cap so $5 prior spend doesn't exhaust
     assert resp.status_code == 200
     assert resp.headers["X-Cost-Cap-USD"] == "50.00"
+
+
+# -------------------------------------------------------------------------
+# Budget signal in response bodies + truthful render charging
+# (grandma-notification wiring, 2026-07-06)
+# -------------------------------------------------------------------------
+
+
+def _patch_fetch_backend(monkeypatch, content="plain page body. " * 40):
+    """Stub the plain fetch path (long content → never triggers auto-render)."""
+    from app.web.fetch import FetchResponse
+
+    async def fake_fetch(url, *, max_chars, offset, **kwargs):
+        return FetchResponse(
+            final_url=url, status_code=200, content_type="text/html",
+            content=content, total_chars=len(content), offset=0,
+            max_chars=max_chars, truncated=False,
+        )
+    monkeypatch.setattr("app.web.router.fetch_url", fake_fetch)
+
+
+@pytest.mark.asyncio
+async def test_search_body_reports_budget_fields(gated_client, ept_keypair, monkeypatch):
+    """Response BODY carries budget state — headers alone never reach the
+    fly's voice; the agent-side notification wiring reads these fields."""
+    from app.main import app
+
+    app.state.eternitas_client = RecordingEternitasClient()
+    _patch_search_backend(monkeypatch)
+
+    token = sign_test_ept(ept_keypair, passport="ET26-BSIG-AAAA")
+    resp = await gated_client.post(
+        "/web/search",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"query": "test"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["budget_warning"] is False
+    assert data["budget_cap_usd"] == 5.0
+    assert data["budget_used_usd"] == pytest.approx(0.0005)
+
+
+@pytest.mark.asyncio
+async def test_search_body_warning_edge_triggers_once(gated_client, ept_keypair, monkeypatch):
+    """budget_warning flips True on exactly the request that crosses 80% of
+    the cap, then back to False — the server edge-trigger means a relaying
+    agent structurally cannot nag its user."""
+    from app.eii.cost_cap import MICROCENTS_PER_USD, _key
+    from app.main import app
+
+    app.state.eternitas_client = RecordingEternitasClient()
+    _patch_search_backend(monkeypatch)
+
+    passport = "ET26-EDGE-AAAA"
+    # 80% of $5 = 4,000,000 microcents. Seed just below so the next
+    # web.search charge (500) crosses the threshold.
+    app.state.redis._strings[_key(passport)] = 4 * MICROCENTS_PER_USD - 100
+
+    token = sign_test_ept(ept_keypair, passport=passport)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    crossing = await gated_client.post("/web/search", headers=headers, json={"query": "a"})
+    after = await gated_client.post("/web/search", headers=headers, json={"query": "b"})
+    assert crossing.status_code == 200 and after.status_code == 200
+    assert crossing.json()["budget_warning"] is True
+    assert after.json()["budget_warning"] is False
+
+
+@pytest.mark.asyncio
+async def test_render_on_charges_web_browse(gated_client, ept_keypair, monkeypatch):
+    """A render='on' fetch debits web.browse ($0.05) on top of web.fetch —
+    pre-fix, renders billed as plain fetches and the budget was fiction."""
+    from app.eii.cost_cap import _key
+    from app.main import app
+    from tests.test_web_fetch import _FakeRenderer, _set_renderer
+
+    app.state.eternitas_client = RecordingEternitasClient()
+    _set_renderer(monkeypatch, _FakeRenderer())
+
+    passport = "ET26-REND-AAAA"
+    token = sign_test_ept(ept_keypair, passport=passport)
+    resp = await gated_client.post(
+        "/web/fetch",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"url": "https://spa.example.com/", "render": "on", "max_chars": 5000},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["rendered_via"] == "browserbase"
+    # web.fetch (1) + web.browse (50,000) microcents
+    assert app.state.redis._strings[_key(passport)] == 50_001
+    # Body reports the spend including the in-handler top-up.
+    assert data["budget_used_usd"] == pytest.approx(0.050001)
+
+
+@pytest.mark.asyncio
+async def test_render_on_blocked_when_budget_exhausted(gated_client, ept_keypair, monkeypatch):
+    """render='on' at an exhausted budget → 429 (web.browse), charge refunded."""
+    from app.eii.cost_cap import MICROCENTS_PER_USD, _key
+    from app.main import app
+    from tests.test_web_fetch import _FakeRenderer, _set_renderer
+
+    app.state.eternitas_client = RecordingEternitasClient()
+    fake = _FakeRenderer()
+    _set_renderer(monkeypatch, fake)
+
+    passport = "ET26-RBLK-AAAA"
+    # 1 microcent below cap: web.fetch pre-charge is allowed (and lands
+    # exactly at cap); the web.browse top-up then sees used >= cap.
+    app.state.redis._strings[_key(passport)] = 5 * MICROCENTS_PER_USD - 1
+
+    token = sign_test_ept(ept_keypair, passport=passport)
+    resp = await gated_client.post(
+        "/web/fetch",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"url": "https://spa.example.com/", "render": "on"},
+    )
+    assert resp.status_code == 429
+    assert resp.headers["X-Cost-Capability"] == "web.browse"
+    assert "render" in resp.json()["detail"].lower()
+    assert fake.calls == []  # no Browserbase session burned
+    # web.browse refunded; only the web.fetch microcent stuck.
+    assert app.state.redis._strings[_key(passport)] == 5 * MICROCENTS_PER_USD
+
+
+@pytest.mark.asyncio
+async def test_render_auto_degrades_to_plain_when_budget_exhausted(
+    gated_client, ept_keypair, monkeypatch
+):
+    """render='auto' at an exhausted budget serves the PLAIN result instead
+    of erroring — the fly keeps working, it just loses the premium render."""
+    from app.eii.cost_cap import MICROCENTS_PER_USD, _key
+    from app.main import app
+    from tests.test_web_fetch import _FakeRenderer, _set_renderer
+
+    app.state.eternitas_client = RecordingEternitasClient()
+    fake = _FakeRenderer()
+    _set_renderer(monkeypatch, fake)
+    # Short shell content → looks_like_needs_render() says escalate.
+    _patch_fetch_backend(monkeypatch, content="tiny shell")
+
+    passport = "ET26-RDEG-AAAA"
+    app.state.redis._strings[_key(passport)] = 5 * MICROCENTS_PER_USD - 1
+
+    token = sign_test_ept(ept_keypair, passport=passport)
+    resp = await gated_client.post(
+        "/web/fetch",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"url": "https://spa.example.com/app", "render": "auto"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["rendered_via"] is None
+    assert data["content"] == "tiny shell"
+    assert fake.calls == []  # renderer never invoked
+    # web.browse charge refunded — only the fetch microcent stuck.
+    assert app.state.redis._strings[_key(passport)] == 5 * MICROCENTS_PER_USD
+
+
+@pytest.mark.asyncio
+async def test_render_auto_escalation_charges_web_browse(
+    gated_client, ept_keypair, monkeypatch
+):
+    """A successful auto-escalated render debits web.browse like render='on'."""
+    from app.eii.cost_cap import _key
+    from app.main import app
+    from tests.test_web_fetch import _FakeRenderer, _set_renderer
+
+    app.state.eternitas_client = RecordingEternitasClient()
+    fake = _FakeRenderer(text="ESCALATED body " * 30)
+    _set_renderer(monkeypatch, fake)
+    _patch_fetch_backend(monkeypatch, content="tiny shell")
+
+    passport = "ET26-RESC-AAAA"
+    token = sign_test_ept(ept_keypair, passport=passport)
+    resp = await gated_client.post(
+        "/web/fetch",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"url": "https://spa.example.com/app", "render": "auto"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["rendered_via"] == "browserbase"
+    assert app.state.redis._strings[_key(passport)] == 50_001
+    assert data["budget_used_usd"] == pytest.approx(0.050001)
