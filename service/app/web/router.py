@@ -22,8 +22,8 @@ from app.auth.ept import PassportClaims
 from app.config import get_settings
 from app.eii import cost_cap, result_cache
 from app.eternitas_client import EternitasClient
-from app.web.extract import extract_structured_data
 from app.web.browserbase import BrowserbaseRenderer, looks_like_needs_render
+from app.web.extract import extract_structured_data
 from app.web.fetch import (
     MAX_BYTES_FETCH,
     UnsafeURLError,
@@ -65,6 +65,38 @@ class SearchResponseModel(BaseModel):
     results: list[SearchResultModel]
     integrity_event_posted: bool
     cache_hit: bool = False
+    # Budget signal (B.9 notification wiring). `budget_warning` flips True on
+    # exactly the request that crosses the warning threshold — the edge
+    # trigger lives server-side in cost_cap.charge(), so an agent that
+    # relays it to its user structurally cannot nag.
+    budget_warning: bool = False
+    budget_used_usd: float | None = None
+    budget_cap_usd: float | None = None
+
+
+def _budget_fields(request: Request, extra_decision=None) -> dict:
+    """Budget-state fields for response bodies (grandma-notification wiring).
+
+    The cost-cap dependency stashes its CostDecision on request.state; merge
+    an optional in-handler decision (the web.browse render top-up) so the
+    reported spend includes it. Values are as-of-charge: a cache-hit refund
+    issued later in the handler shows up on the *next* request's numbers —
+    at most one capability-cost of display skew, never a gating skew.
+    """
+    decision = getattr(request.state, "cost_decision", None)
+    if decision is None:
+        return {}
+    per_usd = cost_cap.MICROCENTS_PER_USD
+    used = decision.used_after
+    warning = decision.warning
+    if extra_decision is not None:
+        used = extra_decision.used_after
+        warning = warning or extra_decision.warning
+    return {
+        "budget_warning": warning,
+        "budget_used_usd": round(used / per_usd, 6),
+        "budget_cap_usd": round(decision.cap_microcents / per_usd, 2),
+    }
 
 
 @router.post("/search", response_model=SearchResponseModel)
@@ -126,6 +158,7 @@ async def web_search(
             results=[SearchResultModel(**r) for r in cached["results"]],
             integrity_event_posted=posted,
             cache_hit=True,
+            **_budget_fields(request),
         )
 
     try:
@@ -177,6 +210,7 @@ async def web_search(
         ],
         integrity_event_posted=posted,
         cache_hit=False,
+        **_budget_fields(request),
     )
 
 
@@ -211,6 +245,34 @@ class FetchResponseModel(BaseModel):
     cache_hit: bool = False
     # None = plain httpx fetch; "browserbase" = rendered in a cloud browser.
     rendered_via: str | None = None
+    # Budget signal — same semantics as SearchResponseModel.
+    budget_warning: bool = False
+    budget_used_usd: float | None = None
+    budget_cap_usd: float | None = None
+
+
+async def _charge_browse_topup(request: Request, claims: PassportClaims):
+    """Charge web.browse ($0.05) when a fetch escalates to a Browserbase render.
+
+    The route dependency charged web.fetch (1 microcent) before the handler
+    knew a render would happen — without this top-up, renders bill as plain
+    fetches and the per-passport budget is fiction (a fly could burn $50 of
+    Browserbase sessions while its meter reads pennies). Uses the same
+    cap/warning parameters the dependency stashed on request.state; returns
+    the CostDecision (caller gates + refunds on skip/failure), or None when
+    the dependency didn't run (fail-open, matching B.9 posture).
+    """
+    cap_usd = getattr(request.state, "cost_cap_usd", None)
+    if cap_usd is None:
+        return None
+    redis = getattr(request.app.state, "redis", None)
+    return await cost_cap.charge(
+        redis,
+        passport=claims.passport,
+        capability="web.browse",
+        cap_usd=cap_usd,
+        warning_pct=getattr(request.state, "cost_warning_pct", 0.80),
+    )
 
 
 @router.post("/fetch", response_model=FetchResponseModel)
@@ -295,17 +357,45 @@ async def web_fetch(
             integrity_event_posted=posted,
             cache_hit=True,
             rendered_via=cached.get("rendered_via"),
+            **_budget_fields(request),
         )
 
     # rendered_via is None for the plain path, "browserbase" once we render.
     rendered_via: str | None = None
+    # The web.browse top-up decision, kept only when a render actually
+    # happened (refunded charges must not feed the budget fields).
+    browse_decision = None
 
     if body.render == "on":
         # Always render — no plain fetch. (Guarded above: renderer configured.)
+        # Premium capability: charge web.browse before burning the session.
+        browse_decision = await _charge_browse_topup(request, claims)
+        if browse_decision is not None and not browse_decision.allowed:
+            # charge() already rolled the denied charge back — no refund here.
+            per_usd = cost_cap.MICROCENTS_PER_USD
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Monthly budget cannot cover a browser render "
+                    f"(web.browse ${cost_cap.COSTS['web.browse'] / per_usd:.2f}; "
+                    f"cap ${browse_decision.cap_microcents / per_usd:.2f}). "
+                    f"Resets on the 1st."
+                ),
+                headers={
+                    "Retry-After": "86400",
+                    "X-Cost-Cap-USD": f"{browse_decision.cap_microcents / per_usd:.2f}",
+                    "X-Cost-Used-USD": f"{browse_decision.used_before / per_usd:.6f}",
+                    "X-Cost-Capability": "web.browse",
+                },
+            )
         try:
             result = await renderer.render(body.url)
             rendered_via = "browserbase"
         except Exception as e:
+            # Render never happened — don't keep the premium charge.
+            if browse_decision is not None:
+                await cost_cap.refund(redis, claims.passport, "web.browse")
+                browse_decision = None
             raise HTTPException(status_code=502, detail=f"render failed: {e}")
     else:
         # Plain fetch first (render="off" stops here; "auto" may escalate).
@@ -333,11 +423,29 @@ async def web_fetch(
             and renderer.is_configured()
             and looks_like_needs_render(result)
         ):
-            try:
-                result = await renderer.render(body.url)
-                rendered_via = "browserbase"
-            except Exception as e:
-                logger.info("auto-render escalation failed for %s, using plain: %s", body.url, e)
+            browse_decision = await _charge_browse_topup(request, claims)
+            if browse_decision is not None and not browse_decision.allowed:
+                # Budget can't cover the premium render — degrade gracefully
+                # to the plain result instead of erroring. The fly keeps
+                # working; it just loses the JS-rendered upgrade this month.
+                # (charge() already rolled the denied charge back.)
+                browse_decision = None
+                logger.info(
+                    "auto-render skipped for %s: monthly budget exhausted "
+                    "(passport %s)", body.url, claims.passport,
+                )
+            else:
+                try:
+                    result = await renderer.render(body.url)
+                    rendered_via = "browserbase"
+                except Exception as e:
+                    if browse_decision is not None:
+                        await cost_cap.refund(redis, claims.passport, "web.browse")
+                        browse_decision = None
+                    logger.info(
+                        "auto-render escalation failed for %s, using plain: %s",
+                        body.url, e,
+                    )
 
     # Cache the full decoded body so subsequent (offset, max_chars) calls
     # for the same URL share one entry.
@@ -402,6 +510,7 @@ async def web_fetch(
         integrity_event_posted=posted,
         cache_hit=False,
         rendered_via=rendered_via,
+        **_budget_fields(request, extra_decision=browse_decision),
     )
 
 

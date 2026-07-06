@@ -148,6 +148,16 @@ def require_passport_with_cost_cap(capability: str):
             warning_pct=settings.monthly_cost_warning_pct,
         )
 
+        # Stash for the route handler: (a) lets it report budget state in
+        # the response BODY (headers alone never reach the fly's voice —
+        # the agent-side notification wiring reads body fields), and
+        # (b) lets it charge capability top-ups against the same cap
+        # (e.g. web.browse when /web/fetch escalates to a Browserbase
+        # render mid-handler, after this dependency already ran).
+        request.state.cost_decision = decision
+        request.state.cost_cap_usd = cap_usd
+        request.state.cost_warning_pct = settings.monthly_cost_warning_pct
+
         per_usd = cost_cap.MICROCENTS_PER_USD
         response.headers["X-Cost-Cap-USD"] = f"{decision.cap_microcents / per_usd:.2f}"
         response.headers["X-Cost-Used-USD"] = f"{decision.used_after / per_usd:.6f}"
