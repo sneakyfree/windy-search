@@ -40,6 +40,7 @@ from app.sources.brave import BraveSource
 from app.sources.google import GoogleSource
 from app.sources.stubs import StubOwnCorpusSource
 from app.v1.search import router as v1_router
+from app.web.browserbase import BrowserbaseRenderer
 from app.web.router import router as web_router
 from app.webhooks.consumer import handle_event, verify_signature
 
@@ -104,6 +105,12 @@ async def lifespan(app: FastAPI):
     if settings.environment != "production":
         sources.insert(0, StubOwnCorpusSource())
     app.state.search_router = Router(sources)
+
+    # B.6 — Browserbase render backend behind /web/fetch (Phase-1 rented
+    # browser layer; own-built replacement = Windy Hand). Dormant via
+    # is_configured()=False when BROWSERBASE_API_KEY is unset, so /web/fetch's
+    # default (render="off") plain path is unchanged.
+    app.state.browserbase_renderer = BrowserbaseRenderer(settings.browserbase_api_key)
 
     yield
 

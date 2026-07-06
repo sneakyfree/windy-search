@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import UTC, datetime
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -22,6 +23,7 @@ from app.config import get_settings
 from app.eii import cost_cap, result_cache
 from app.eternitas_client import EternitasClient
 from app.web.extract import extract_structured_data
+from app.web.browserbase import BrowserbaseRenderer, looks_like_needs_render
 from app.web.fetch import (
     MAX_BYTES_FETCH,
     UnsafeURLError,
@@ -187,6 +189,12 @@ class FetchRequest(BaseModel):
     url: str = Field(..., min_length=8, max_length=2048)
     max_chars: int = Field(default=5000, ge=1, le=MAX_BYTES_FETCH)
     offset: int = Field(default=0, ge=0)
+    # B.6 — render mode. "off" (default) = plain httpx, unchanged behavior.
+    # "on" = always render in a Browserbase cloud browser (JS-executed).
+    # "auto" = plain fetch first, escalate to a render only when the result
+    # looks like an unhydrated SPA shell or a bot-wall. "on"/"auto" require
+    # BROWSERBASE_API_KEY; when unset they behave like "off" (auto) or 503 (on).
+    render: Literal["off", "auto", "on"] = "off"
 
 
 class FetchResponseModel(BaseModel):
@@ -201,6 +209,8 @@ class FetchResponseModel(BaseModel):
     truncated: bool
     integrity_event_posted: bool
     cache_hit: bool = False
+    # None = plain httpx fetch; "browserbase" = rendered in a cloud browser.
+    rendered_via: str | None = None
 
 
 @router.post("/fetch", response_model=FetchResponseModel)
@@ -226,11 +236,23 @@ async def web_fetch(
       - Network/timeout → 502
     """
     redis = getattr(request.app.state, "redis", None)
+    renderer: BrowserbaseRenderer | None = getattr(
+        request.app.state, "browserbase_renderer", None
+    )
+
+    # render="on" needs a configured Browserbase key; fail clearly if not.
+    if body.render == "on" and (renderer is None or not renderer.is_configured()):
+        raise HTTPException(
+            status_code=503,
+            detail="render='on' requires Browserbase (BROWSERBASE_API_KEY not configured)",
+        )
 
     # B.10 — cache key includes pagination so /fetch?offset=0 and offset=100
     # don't collide. Cached value stores the FULL body (not the slice) so
     # different (offset, max_chars) combos can be served from one entry.
-    cache_payload = {"url": body.url}
+    # `render` is part of the key so a rendered body and a plain body for the
+    # same URL never collide.
+    cache_payload = {"url": body.url, "render": body.render}
     cached = await result_cache.get_cached(redis, "web.fetch", cache_payload)
     if cached is not None:
         await cost_cap.refund(redis, claims.passport, "web.fetch")
@@ -272,22 +294,50 @@ async def web_fetch(
             truncated=truncated,
             integrity_event_posted=posted,
             cache_hit=True,
+            rendered_via=cached.get("rendered_via"),
         )
 
-    try:
-        # Pass max_chars = full body size so we can cache the un-sliced text.
-        # The endpoint then re-slices to the caller's requested window.
-        result = await fetch_url(
-            body.url,
-            max_chars=MAX_BYTES_FETCH,
-            offset=0,
-        )
-    except UnsafeURLError as e:
-        raise HTTPException(status_code=400, detail=f"unsafe URL: {e}")
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"upstream HTTP {e.response.status_code}")
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"upstream network error: {e}")
+    # rendered_via is None for the plain path, "browserbase" once we render.
+    rendered_via: str | None = None
+
+    if body.render == "on":
+        # Always render — no plain fetch. (Guarded above: renderer configured.)
+        try:
+            result = await renderer.render(body.url)
+            rendered_via = "browserbase"
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"render failed: {e}")
+    else:
+        # Plain fetch first (render="off" stops here; "auto" may escalate).
+        try:
+            # Pass max_chars = full body size so we can cache the un-sliced text.
+            # The endpoint then re-slices to the caller's requested window.
+            result = await fetch_url(
+                body.url,
+                max_chars=MAX_BYTES_FETCH,
+                offset=0,
+            )
+        except UnsafeURLError as e:
+            raise HTTPException(status_code=400, detail=f"unsafe URL: {e}")
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=502, detail=f"upstream HTTP {e.response.status_code}")
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"upstream network error: {e}")
+
+        # render="auto": escalate to a real browser only if the plain result
+        # looks like an unhydrated SPA shell or a bot-wall, and Browserbase is
+        # configured. Any render failure falls back to the plain result.
+        if (
+            body.render == "auto"
+            and renderer is not None
+            and renderer.is_configured()
+            and looks_like_needs_render(result)
+        ):
+            try:
+                result = await renderer.render(body.url)
+                rendered_via = "browserbase"
+            except Exception as e:
+                logger.info("auto-render escalation failed for %s, using plain: %s", body.url, e)
 
     # Cache the full decoded body so subsequent (offset, max_chars) calls
     # for the same URL share one entry.
@@ -300,6 +350,7 @@ async def web_fetch(
             "status_code": result.status_code,
             "content_type": result.content_type,
             "content_full": result.content,  # already the full decoded body when offset=0/max=MAX
+            "rendered_via": rendered_via,
         },
     )
 
@@ -332,6 +383,7 @@ async def web_fetch(
                 "url_host": _safe_host(body.url),
                 "status_code": result.status_code,
                 "content_type": result.content_type[:50],
+                "rendered_via": rendered_via,
             },
             idempotency_key=idem,
         )
@@ -349,6 +401,7 @@ async def web_fetch(
         truncated=result_for_response.truncated,
         integrity_event_posted=posted,
         cache_hit=False,
+        rendered_via=rendered_via,
     )
 
 
