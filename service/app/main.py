@@ -220,7 +220,14 @@ def create_app() -> FastAPI:
     async def health_ready() -> dict:
         """Readiness probe — requires Redis if configured. B.3+ rely on
         Redis; while Redis is optional in B.1, surfacing its state lets
-        deploys see degraded mode."""
+        deploys see degraded mode.
+
+        Also reports how many search sources are configured. Found live
+        2026-07-06: prod ran with ZERO configured bridges — every
+        /v1/search honestly returned empty (post-#49) — while this probe
+        said "ready". A search service with no sources is degraded and
+        the probe must say so.
+        """
         redis_ok = True
         if settings.redis_url:
             try:
@@ -230,9 +237,19 @@ def create_app() -> FastAPI:
                     await app.state.redis.ping()
             except Exception:
                 redis_ok = False
+
+        search_router = getattr(app.state, "search_router", None)
+        sources_configured = (
+            sum(1 for s in search_router.sources if s.is_configured())
+            if search_router is not None
+            else 0
+        )
+
+        ready = redis_ok and sources_configured > 0
         return {
-            "status": "ready" if redis_ok else "degraded",
+            "status": "ready" if ready else "degraded",
             "redis": redis_ok,
+            "sources_configured": sources_configured,
         }
 
     @app.get("/whoami")

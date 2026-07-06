@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     eternitas_webhook_secret: str | None = None
 
     # --- Search backends (B.4) -------------------------------------------
-    brave_search_api_key: str | None = None  # falls back to DDG when None
+    brave_search_api_key: str | None = None  # source dormant when None (no keyless fallback)
 
     # Google Custom Search (M2.2) — LAST-RESORT bridge per master plan §4
     # P1. Requires BOTH a Custom Search JSON API key AND a Custom Search
