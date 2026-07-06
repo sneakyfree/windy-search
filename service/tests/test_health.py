@@ -17,11 +17,35 @@ async def test_health_returns_ok(client):
 @pytest.mark.asyncio
 async def test_health_ready_no_redis(client):
     """Without Redis configured, readiness reports ready (B.1 doesn't
-    need Redis; B.3+ will tighten this)."""
+    need Redis; B.3+ will tighten this). The bare test client never runs
+    lifespan, so install a router with one configured source — readiness
+    requires it since 2026-07-06 (prod ran with zero configured bridges
+    while claiming "ready").
+    """
+    from app.main import app
+    from app.router import Router
+    from app.sources.stubs import StubOwnCorpusSource
+
+    app.state.search_router = Router([StubOwnCorpusSource()])
+    try:
+        resp = await client.get("/health/ready")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ready"
+        assert data["sources_configured"] >= 1
+    finally:
+        app.state.search_router = None
+
+
+@pytest.mark.asyncio
+async def test_health_ready_degraded_without_sources(client):
+    """Zero configured sources ⇒ degraded, even with Redis happy. This is
+    the exact prod condition found live 2026-07-06 (no bridge keys set)."""
     resp = await client.get("/health/ready")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["status"] == "ready"
+    assert data["status"] == "degraded"
+    assert data["sources_configured"] == 0
 
 
 @pytest.mark.asyncio
