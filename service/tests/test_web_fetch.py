@@ -257,3 +257,136 @@ async def test_fetch_consumes_rate_limit(gated_client, ept_keypair, monkeypatch)
         "/web/fetch", headers=headers, json={"url": "https://x.test/"}
     )
     assert blocked.status_code == 429
+
+
+# ---- B.6 Browserbase render tests -------------------------------------
+
+class _FakeRenderer:
+    """Stand-in for BrowserbaseRenderer — never touches the network."""
+
+    def __init__(self, *, configured=True, text=None):
+        self._configured = configured
+        self.text = text or ("Rendered article body. " * 30)
+        self.calls = []
+
+    def is_configured(self):
+        return self._configured
+
+    async def render(self, url, *, timeout_s=30.0):
+        from app.web.fetch import FetchResponse
+
+        self.calls.append(url)
+        t = self.text
+        return FetchResponse(
+            final_url=url,
+            status_code=200,
+            content_type="text/plain; charset=utf-8",
+            content=t,
+            total_chars=len(t),
+            offset=0,
+            max_chars=len(t),
+            truncated=False,
+        )
+
+
+def _set_renderer(monkeypatch, renderer):
+    from app.main import app
+
+    monkeypatch.setattr(app.state, "browserbase_renderer", renderer, raising=False)
+
+
+def test_looks_like_needs_render_heuristic():
+    from app.web.browserbase import looks_like_needs_render
+    from app.web.fetch import FetchResponse
+
+    def fr(content):
+        return FetchResponse("u", 200, "text/plain", content, len(content), 0, 1, False)
+
+    assert looks_like_needs_render(fr("tiny shell")) is True           # < 300 chars
+    assert looks_like_needs_render(fr("Just a moment... " * 40)) is True  # challenge marker
+    assert looks_like_needs_render(fr("Real content. " * 40)) is False  # long, no marker
+
+
+@pytest.mark.asyncio
+async def test_render_off_is_plain_and_never_calls_renderer(gated_client, ept_keypair, monkeypatch):
+    fake = _FakeRenderer()
+    _set_renderer(monkeypatch, fake)
+    _patch_fetch_url(monkeypatch, content="<html><body>Plain body wins here</body></html>")
+    token = sign_test_ept(ept_keypair, passport="ET26-REN-OFF0")
+    resp = await gated_client.post(
+        "/web/fetch",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"url": "https://example.com/off"},  # render defaults to "off"
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert "Plain body wins" in data["content"]
+    assert data["rendered_via"] is None
+    assert fake.calls == []  # renderer untouched on the default path
+
+
+@pytest.mark.asyncio
+async def test_render_on_uses_browserbase(gated_client, ept_keypair, monkeypatch):
+    fake = _FakeRenderer(text="JS-HYDRATED CONTENT that plain fetch could not see " * 5)
+    _set_renderer(monkeypatch, fake)
+    token = sign_test_ept(ept_keypair, passport="ET26-REN-ON00")
+    resp = await gated_client.post(
+        "/web/fetch",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"url": "https://spa.example.com/", "render": "on", "max_chars": 5000},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert "JS-HYDRATED CONTENT" in data["content"]
+    assert data["rendered_via"] == "browserbase"
+    assert fake.calls == ["https://spa.example.com/"]
+
+
+@pytest.mark.asyncio
+async def test_render_on_without_key_is_503(gated_client, ept_keypair, monkeypatch):
+    _set_renderer(monkeypatch, _FakeRenderer(configured=False))
+    token = sign_test_ept(ept_keypair, passport="ET26-REN-503X")
+    resp = await gated_client.post(
+        "/web/fetch",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"url": "https://spa.example.com/", "render": "on"},
+    )
+    assert resp.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_render_auto_escalates_on_shell(gated_client, ept_keypair, monkeypatch):
+    fake = _FakeRenderer(text="ESCALATED render output " * 20)
+    _set_renderer(monkeypatch, fake)
+    # Plain fetch returns a tiny SPA shell → should escalate.
+    _patch_fetch_url(monkeypatch, content="<html><body>Loading…</body></html>")
+    token = sign_test_ept(ept_keypair, passport="ET26-REN-AUT0")
+    resp = await gated_client.post(
+        "/web/fetch",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"url": "https://spa.example.com/app", "render": "auto"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert "ESCALATED render output" in data["content"]
+    assert data["rendered_via"] == "browserbase"
+    assert fake.calls == ["https://spa.example.com/app"]
+
+
+@pytest.mark.asyncio
+async def test_render_auto_skips_when_plain_is_substantial(gated_client, ept_keypair, monkeypatch):
+    fake = _FakeRenderer()
+    _set_renderer(monkeypatch, fake)
+    # A substantial article — no escalation.
+    _patch_fetch_url(monkeypatch, content="<html><body>" + ("Real article paragraph. " * 40) + "</body></html>")
+    token = sign_test_ept(ept_keypair, passport="ET26-REN-AUT1")
+    resp = await gated_client.post(
+        "/web/fetch",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"url": "https://news.example.com/story", "render": "auto"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert "Real article paragraph" in data["content"]
+    assert data["rendered_via"] is None
+    assert fake.calls == []  # plain was good enough
