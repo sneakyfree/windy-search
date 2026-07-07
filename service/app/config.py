@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     windy_admin_ingest_url: str | None = None
     windy_admin_ingest_token: str | None = None
 
+    # --- Thin admin API (Windy Admin Phase 3) -----------------------------
+    # Bearer for /admin/budget-cap/*. Caller is windy-admin only; RBAC +
+    # audit live there. Unset = admin API disabled (503).
+    admin_api_token: str | None = None
+
     # --- B.9 Cost caps ---------------------------------------------------
     monthly_cost_cap_usd_default: float = 5.0
     monthly_cost_warning_pct: float = 0.80

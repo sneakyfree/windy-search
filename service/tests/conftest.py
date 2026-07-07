@@ -93,6 +93,14 @@ class FakeRedisB3:
             return v
         return str(v).encode()
 
+    async def delete(self, *keys: str) -> int:
+        removed = 0
+        for key in keys:
+            if key in self._strings:
+                del self._strings[key]
+                removed += 1
+        return removed
+
     async def set(
         self,
         key: str,
