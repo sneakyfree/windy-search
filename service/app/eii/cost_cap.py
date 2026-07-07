@@ -56,6 +56,36 @@ COSTS: dict[str, int] = {
 }
 
 KEY_PREFIX = "cost:windy-search:passport"
+# Admin-set per-passport cap override (Windy Admin Phase 3). No month
+# suffix — it persists until cleared. Value = cap in microcents.
+OVERRIDE_KEY_PREFIX = "cost:windy-search:capover"
+
+
+def _override_key(passport: str) -> str:
+    return f"{OVERRIDE_KEY_PREFIX}:{passport}"
+
+
+async def get_cap_override(redis: aioredis.Redis | None, passport: str) -> int | None:
+    """Admin override cap in microcents, or None when unset/unavailable."""
+    if redis is None:
+        return None
+    try:
+        raw = await redis.get(_override_key(passport))
+        return int(raw) if raw is not None else None
+    except Exception as e:
+        logger.warning("cap override read failed for %s: %s", passport, e)
+        return None
+
+
+async def set_cap_override(
+    redis: aioredis.Redis, passport: str, cap_microcents: int | None
+) -> None:
+    """Set (or clear with None) the admin override. Caller is the thin
+    admin API — auth + audit live in windy-admin (ADR-WA-001 §2)."""
+    if cap_microcents is None:
+        await redis.delete(_override_key(passport))
+    else:
+        await redis.set(_override_key(passport), int(cap_microcents))
 
 
 @dataclass(frozen=True)
@@ -115,6 +145,10 @@ async def charge(
     """
     cost = COSTS.get(capability, 0)
     cap_microcents = int(cap_usd * MICROCENTS_PER_USD)
+
+    override = await get_cap_override(redis, passport)
+    if override is not None:
+        cap_microcents = override
 
     if redis is None:
         _emit_charge_event(passport, capability, cost, allowed=True)
