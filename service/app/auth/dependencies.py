@@ -31,7 +31,17 @@ async def require_passport(
         raise HTTPException(status_code=503, detail="EPT verification not configured")
 
     token = authorization[len("Bearer "):]
-    return await verify_ept(token, jwks_cache)
+    claims = await verify_ept(token, jwks_cache)
+
+    # Signature verification alone can't see a revocation issued after
+    # mint (the EPT is a 365-day offline bearer). Same 503-not-401
+    # posture as the JWKS cache when unconfigured.
+    revocation = getattr(request.app.state, "revocation", None)
+    if revocation is None:
+        raise HTTPException(status_code=503, detail="Revocation checking not configured")
+    await revocation.check(claims.passport)
+
+    return claims
 
 
 async def require_passport_with_eii_rate_limit(

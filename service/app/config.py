@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     # --- Eternitas integration (B.2 auth, B.4-B.8 event emission) ---------
     eternitas_base_url: str = "https://api.eternitas.ai"
     eternitas_jwks_url: str = "https://api.eternitas.ai/.well-known/eternitas-keys"
+    # Revocation enforcement: the EPT is a 365-day offline bearer, so every
+    # authenticated request consults a TTL-cached copy of the eternitas CRL
+    # (plus the passport.revoked webhook for sub-TTL immediacy). When the
+    # CRL is unreachable past crl_max_stale_seconds, gated routes fail
+    # CLOSED in production (503) — override with revocation_fail_closed.
+    eternitas_crl_url: str = "https://api.eternitas.ai/.well-known/eternitas-crl"
+    crl_ttl_seconds: int = 30
+    crl_max_stale_seconds: int = 300
+    revocation_fail_closed: bool | None = None  # None → closed iff production
     eternitas_platform_api_key: str | None = None  # et_plt_* — required to POST integrity events
     # The webhook_secret eternitas registered alongside our platform key.
     # When present, /webhooks verifies X-Eternitas-Signature HMAC and acts
