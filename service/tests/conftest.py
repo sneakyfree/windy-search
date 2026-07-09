@@ -21,15 +21,33 @@ def ept_keypair():
     return generate_ept_keypair()
 
 
+class StubRevocationCache:
+    """Allow-all revocation stub; tests flag passports revoked directly."""
+
+    def __init__(self) -> None:
+        self.revoked: set[str] = set()
+
+    async def check(self, passport: str) -> None:
+        from fastapi import HTTPException
+
+        if passport in self.revoked:
+            raise HTTPException(status_code=401, detail="EPT revoked")
+
+    def blacklist(self, passport: str, *, suspended: bool = False) -> None:
+        self.revoked.add(passport)
+
+
 @pytest_asyncio.fixture
 async def auth_client(ept_keypair):
     """Test client with a stub JWKS cache pre-injected — EPT verification
     works against test-issued tokens without going to network."""
     app.state.jwks_cache = StubJWKSCache(ept_keypair["jwks"])
+    app.state.revocation = StubRevocationCache()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
     app.state.jwks_cache = None
+    app.state.revocation = None
 
 
 # ---- B.3 fixtures ---------------------------------------------------
@@ -155,11 +173,13 @@ async def gated_client(ept_keypair):
     """Test client wired with stubs for JWKS, score cache, and Redis —
     exercises the full B.2 + B.3 dependency chain end-to-end."""
     app.state.jwks_cache = StubJWKSCache(ept_keypair["jwks"])
+    app.state.revocation = StubRevocationCache()
     app.state.score_cache = StubScoreCache(default_score=500)
     app.state.redis = FakeRedisB3()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
     app.state.jwks_cache = None
+    app.state.revocation = None
     app.state.score_cache = None
     app.state.redis = None

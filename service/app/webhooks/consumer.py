@@ -52,16 +52,29 @@ async def handle_event(event_type: str, payload: dict[str, Any], app_state: Any)
         return
 
     if event_type in ("passport.revoked", "passport.suspended"):
-        # Could blacklist the passport in a local cache to fast-fail
-        # gated routes. Future codon — for now just log so we have
-        # operational visibility that revocations are propagating.
-        logger.info(
-            "received %s for passport %s — no handler yet",
-            event_type, payload.get("passport_number") or payload.get("passport"),
-        )
+        await _on_passport_revoked(event_type, payload, app_state)
         return
 
     logger.debug("received unhandled event_type=%s", event_type)
+
+
+async def _on_passport_revoked(event_type: str, payload: dict[str, Any], app_state: Any) -> None:
+    """Blacklist the passport immediately so gated routes fast-fail
+    without waiting for the next CRL refresh. Suspensions are reversible
+    so they carry a TTL inside the RevocationCache; revocations hold for
+    the process lifetime (the CRL poll is the durable backstop)."""
+    passport = payload.get("passport_number") or payload.get("passport")
+    if not passport:
+        logger.warning("%s payload missing passport: %s", event_type, payload)
+        return
+
+    revocation = getattr(app_state, "revocation", None)
+    if revocation is None:
+        logger.warning("%s for %s but no revocation cache wired", event_type, passport)
+        return
+
+    revocation.blacklist(passport, suspended=(event_type == "passport.suspended"))
+    logger.info("blacklisted %s after %s", passport, event_type)
 
 
 async def _on_integrity_event(payload: dict[str, Any], app_state: Any) -> None:

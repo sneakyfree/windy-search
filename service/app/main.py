@@ -30,6 +30,7 @@ from app.auth.dependencies import (
 )
 from app.auth.ept import PassportClaims
 from app.auth.jwks import JWKSCache
+from app.auth.revocation import RevocationCache
 from app.config import get_settings
 from app.eii.score_cache import IntegrityScoreCache
 from app.eii.tiers import tier_for_score
@@ -70,6 +71,21 @@ async def lifespan(app: FastAPI):
 
     # B.3 — EII score cache feeds the per-tier rate limiter.
     app.state.score_cache = IntegrityScoreCache(eternitas_base_url=settings.eternitas_base_url)
+
+    # Revocation enforcement — CRL cache + webhook blacklist consulted by
+    # require_passport on every authenticated request. Lazy like the JWKS
+    # cache: the first gated request triggers the CRL fetch.
+    fail_closed = (
+        settings.revocation_fail_closed
+        if settings.revocation_fail_closed is not None
+        else settings.environment == "production"
+    )
+    app.state.revocation = RevocationCache(
+        crl_url=settings.eternitas_crl_url,
+        ttl_seconds=settings.crl_ttl_seconds,
+        max_stale_seconds=settings.crl_max_stale_seconds,
+        fail_closed=fail_closed,
+    )
 
     # B.4 — Eternitas event poster. Best-effort: when the platform key
     # isn't configured (B.11 deploy hasn't provisioned it yet), the
