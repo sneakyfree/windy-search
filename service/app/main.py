@@ -43,6 +43,7 @@ from app.sources.google import GoogleSource
 from app.sources.stubs import StubOwnCorpusSource
 from app.v1.search import router as v1_router
 from app.web.browserbase import BrowserbaseRenderer
+from app.web.render_chain import build_chain
 from app.web.router import router as web_router
 from app.web.windyhand import WindyHandRenderer
 from app.webhooks.consumer import handle_event, verify_signature
@@ -124,16 +125,21 @@ async def lifespan(app: FastAPI):
         sources.insert(0, StubOwnCorpusSource())
     app.state.search_router = Router(sources)
 
-    # The render slot behind /web/fetch (ADR-WH-001, swappable backend):
-    # Windy Hand — our OWN fleet (Phase 2) — when WINDY_HAND_BASE_URL is
-    # set; else Browserbase (Phase-1 rented). Both dormant via
-    # is_configured()=False when unconfigured, so /web/fetch's default
-    # (render="off") plain path is unchanged either way.
-    windy_hand = WindyHandRenderer(settings.windy_hand_base_url)
+    # The render slot behind /web/fetch (ADR-WH-001) is an ORDERED FAILOVER
+    # CHAIN: RENDER_BACKENDS (default "browserbase") names the priority
+    # order; /web/fetch tries each configured backend in turn and falls
+    # through on failure. Default = Browserbase only (today's exact
+    # behavior). Push-button flip to our own fleet:
+    #   RENDER_BACKENDS=windy-hand,browserbase  (native first, BB fallback).
+    by_name = {
+        "windy-hand": WindyHandRenderer(settings.windy_hand_base_url),
+        "browserbase": BrowserbaseRenderer(settings.browserbase_api_key),
+    }
+    order = [n.strip() for n in settings.render_backends.split(",") if n.strip()]
+    app.state.render_chain = build_chain(order, by_name)
+    # Back-compat: first backend for any legacy single-backend reader.
     app.state.render_backend = (
-        windy_hand
-        if windy_hand.is_configured()
-        else BrowserbaseRenderer(settings.browserbase_api_key)
+        app.state.render_chain[0] if app.state.render_chain else None
     )
 
     yield

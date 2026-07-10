@@ -61,11 +61,26 @@ class Settings(BaseSettings):
     google_cse_id: str | None = None
 
     # --- Render slot backends (ADR-WH-001) --------------------------------
-    # Windy Hand — the own-built Phase-2 fleet. When set, it takes the
-    # render slot and Browserbase goes cold (90-day-unwind P1 posture).
-    # e.g. "http://127.0.0.1:8560" (same box) or the fleet host's addr.
+    # The render slot is an ORDERED FAILOVER CHAIN: /web/fetch tries each
+    # named backend in priority order and transparently falls through to the
+    # next on failure, so one backend having a bad day never reaches the
+    # user. `render_backends` is that order; only names whose backend is
+    # configured participate.
+    #
+    #   PUSH-BUTTON FLIP — one env var, no code change:
+    #     today (Browserbase native):      RENDER_BACKENDS=browserbase
+    #     flip to Windy Hand native:       RENDER_BACKENDS=windy-hand,browserbase
+    #       (own fleet first; Browserbase auto-fallback if the fleet fails)
+    #
+    # Default keeps today's exact behavior (Browserbase only). Extensible to
+    # more providers by adding names here + a backend in main.py.
+    # Comma-separated string (NOT a list field — avoids the pydantic-settings
+    # list-env JSON-parse trap); split in main.py.
+    render_backends: str = "browserbase"
+    # Windy Hand — the own-built Phase-2 fleet. e.g. "http://127.0.0.1:8560"
+    # (same box) or the fleet host's addr. Configured iff this is set.
     windy_hand_base_url: str | None = None
-    # Browserbase — the Phase-1 rented layer (fallback when Windy Hand unset).
+    # Browserbase — the Phase-1 rented layer. Configured iff the key is set.
     browserbase_api_key: str | None = None
     browserbase_project_id: str | None = None
 
