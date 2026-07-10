@@ -260,7 +260,7 @@ def _bearer_token(request: Request) -> str | None:
 
 
 async def _charge_browse_topup(request: Request, claims: PassportClaims):
-    """Charge web.browse ($0.05) when a fetch escalates to a Browserbase render.
+    """Charge web.browse ($0.05) when a fetch escalates to a render.
 
     The route dependency charged web.fetch (1 microcent) before the handler
     knew a render would happen — without this top-up, renders bill as plain
@@ -269,7 +269,19 @@ async def _charge_browse_topup(request: Request, claims: PassportClaims):
     cap/warning parameters the dependency stashed on request.state; returns
     the CostDecision (caller gates + refunds on skip/failure), or None when
     the dependency didn't run (fail-open, matching B.9 posture).
+
+    SINGLE-METER RULE (ADR-WH-001): when the render slot is our own Windy
+    Hand fleet, the fleet already charges `web.render` against the SAME
+    forwarded EPT on its own ledger. Charging web.browse here too would
+    double-bill one render across two services. So when the active backend
+    is Windy Hand, we skip the search-side charge and let the fleet be the
+    single meter. Browserbase (rented) doesn't meter itself, so it still
+    gets the web.browse top-up here. Returning None is the existing
+    "no top-up happened" contract the caller already handles.
     """
+    renderer = getattr(request.app.state, "render_backend", None)
+    if getattr(renderer, "via", None) == "windy-hand":
+        return None  # fleet meters web.render on the forwarded EPT — single meter
     cap_usd = getattr(request.state, "cost_cap_usd", None)
     if cap_usd is None:
         return None
