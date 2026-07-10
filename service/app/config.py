@@ -60,7 +60,12 @@ class Settings(BaseSettings):
     google_search_api_key: str | None = None
     google_cse_id: str | None = None
 
-    # --- B.6 Browserbase (deferred to its codon) -------------------------
+    # --- Render slot backends (ADR-WH-001) --------------------------------
+    # Windy Hand — the own-built Phase-2 fleet. When set, it takes the
+    # render slot and Browserbase goes cold (90-day-unwind P1 posture).
+    # e.g. "http://127.0.0.1:8560" (same box) or the fleet host's addr.
+    windy_hand_base_url: str | None = None
+    # Browserbase — the Phase-1 rented layer (fallback when Windy Hand unset).
     browserbase_api_key: str | None = None
     browserbase_project_id: str | None = None
 

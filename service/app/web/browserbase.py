@@ -42,6 +42,8 @@ _CHALLENGE_MARKERS = (
 class BrowserbaseRenderer:
     """Renders a URL in a Browserbase cloud browser and returns visible text."""
 
+    via = "browserbase"
+
     def __init__(self, api_key: str | None) -> None:
         self._api_key = api_key
         self._project_id: str | None = None
@@ -64,11 +66,16 @@ class BrowserbaseRenderer:
         self._project_id = projects[0]["id"]
         return self._project_id
 
-    async def render(self, url: str, *, timeout_s: float = 30.0) -> FetchResponse:
+    async def render(
+        self, url: str, *, timeout_s: float = 30.0, ept: str | None = None
+    ) -> FetchResponse:
         """Render ``url`` in a cloud browser; return its visible text as a
         ``FetchResponse`` (so the router handles it identically to a plain
         fetch). Raises ``RuntimeError`` on any failure — the caller maps that
-        to a 502. Never call when ``is_configured()`` is False."""
+        to a 502. Never call when ``is_configured()`` is False.
+
+        ``ept`` is accepted for backend-interface parity (the Windy Hand
+        backend forwards it); Browserbase has no use for it."""
         if not self.is_configured():
             raise RuntimeError("Browserbase not configured")
         # Same scheme/host safety posture as the plain fetch path.

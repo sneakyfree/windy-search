@@ -262,7 +262,9 @@ async def test_fetch_consumes_rate_limit(gated_client, ept_keypair, monkeypatch)
 # ---- B.6 Browserbase render tests -------------------------------------
 
 class _FakeRenderer:
-    """Stand-in for BrowserbaseRenderer — never touches the network."""
+    """Stand-in for the render backend — never touches the network."""
+
+    via = "browserbase"
 
     def __init__(self, *, configured=True, text=None):
         self._configured = configured
@@ -272,7 +274,7 @@ class _FakeRenderer:
     def is_configured(self):
         return self._configured
 
-    async def render(self, url, *, timeout_s=30.0):
+    async def render(self, url, *, timeout_s=30.0, ept=None):
         from app.web.fetch import FetchResponse
 
         self.calls.append(url)
@@ -292,7 +294,7 @@ class _FakeRenderer:
 def _set_renderer(monkeypatch, renderer):
     from app.main import app
 
-    monkeypatch.setattr(app.state, "browserbase_renderer", renderer, raising=False)
+    monkeypatch.setattr(app.state, "render_backend", renderer, raising=False)
 
 
 def test_looks_like_needs_render_heuristic():

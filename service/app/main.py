@@ -36,14 +36,15 @@ from app.eii.score_cache import IntegrityScoreCache
 from app.eii.tiers import tier_for_score
 from app.eternitas_client import EternitasClient
 from app.router import Router
-from app.routes.version import router as version_router
 from app.routes.admin_budget import router as admin_budget_router
+from app.routes.version import router as version_router
 from app.sources.brave import BraveSource
 from app.sources.google import GoogleSource
 from app.sources.stubs import StubOwnCorpusSource
 from app.v1.search import router as v1_router
 from app.web.browserbase import BrowserbaseRenderer
 from app.web.router import router as web_router
+from app.web.windyhand import WindyHandRenderer
 from app.webhooks.consumer import handle_event, verify_signature
 
 logger = logging.getLogger(__name__)
@@ -123,11 +124,17 @@ async def lifespan(app: FastAPI):
         sources.insert(0, StubOwnCorpusSource())
     app.state.search_router = Router(sources)
 
-    # B.6 — Browserbase render backend behind /web/fetch (Phase-1 rented
-    # browser layer; own-built replacement = Windy Hand). Dormant via
-    # is_configured()=False when BROWSERBASE_API_KEY is unset, so /web/fetch's
-    # default (render="off") plain path is unchanged.
-    app.state.browserbase_renderer = BrowserbaseRenderer(settings.browserbase_api_key)
+    # The render slot behind /web/fetch (ADR-WH-001, swappable backend):
+    # Windy Hand — our OWN fleet (Phase 2) — when WINDY_HAND_BASE_URL is
+    # set; else Browserbase (Phase-1 rented). Both dormant via
+    # is_configured()=False when unconfigured, so /web/fetch's default
+    # (render="off") plain path is unchanged either way.
+    windy_hand = WindyHandRenderer(settings.windy_hand_base_url)
+    app.state.render_backend = (
+        windy_hand
+        if windy_hand.is_configured()
+        else BrowserbaseRenderer(settings.browserbase_api_key)
+    )
 
     yield
 

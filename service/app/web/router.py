@@ -30,6 +30,7 @@ from app.web.fetch import (
     fetch_url,
 )
 from app.web.search import search
+from app.web.windyhand import WindyHandRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +252,13 @@ class FetchResponseModel(BaseModel):
     budget_cap_usd: float | None = None
 
 
+def _bearer_token(request: Request) -> str | None:
+    """The caller's raw EPT, forwarded to the Windy Hand backend so the
+    fleet's own gate/meter/integrity events see the true passport."""
+    auth = request.headers.get("authorization") or ""
+    return auth[len("Bearer "):] if auth.startswith("Bearer ") else None
+
+
 async def _charge_browse_topup(request: Request, claims: PassportClaims):
     """Charge web.browse ($0.05) when a fetch escalates to a Browserbase render.
 
@@ -298,15 +306,20 @@ async def web_fetch(
       - Network/timeout → 502
     """
     redis = getattr(request.app.state, "redis", None)
-    renderer: BrowserbaseRenderer | None = getattr(
-        request.app.state, "browserbase_renderer", None
+    # The render slot (ADR-WH-001): Windy Hand (own fleet) when configured,
+    # else Browserbase (rented), else dormant. main.py picks at lifespan.
+    renderer: WindyHandRenderer | BrowserbaseRenderer | None = getattr(
+        request.app.state, "render_backend", None
     )
 
-    # render="on" needs a configured Browserbase key; fail clearly if not.
+    # render="on" needs a configured render backend; fail clearly if not.
     if body.render == "on" and (renderer is None or not renderer.is_configured()):
         raise HTTPException(
             status_code=503,
-            detail="render='on' requires Browserbase (BROWSERBASE_API_KEY not configured)",
+            detail=(
+                "render='on' requires a render backend (WINDY_HAND_BASE_URL "
+                "or BROWSERBASE_API_KEY; neither configured)"
+            ),
         )
 
     # B.10 — cache key includes pagination so /fetch?offset=0 and offset=100
@@ -360,7 +373,8 @@ async def web_fetch(
             **_budget_fields(request),
         )
 
-    # rendered_via is None for the plain path, "browserbase" once we render.
+    # rendered_via is None for the plain path; the backend's `via` tag
+    # ("windy-hand" | "browserbase") once we render.
     rendered_via: str | None = None
     # The web.browse top-up decision, kept only when a render actually
     # happened (refunded charges must not feed the budget fields).
@@ -389,8 +403,8 @@ async def web_fetch(
                 },
             )
         try:
-            result = await renderer.render(body.url)
-            rendered_via = "browserbase"
+            result = await renderer.render(body.url, ept=_bearer_token(request))
+            rendered_via = renderer.via
         except Exception as e:
             # Render never happened — don't keep the premium charge.
             if browse_decision is not None:
@@ -436,8 +450,8 @@ async def web_fetch(
                 )
             else:
                 try:
-                    result = await renderer.render(body.url)
-                    rendered_via = "browserbase"
+                    result = await renderer.render(body.url, ept=_bearer_token(request))
+                    rendered_via = renderer.via
                 except Exception as e:
                     if browse_decision is not None:
                         await cost_cap.refund(redis, claims.passport, "web.browse")
