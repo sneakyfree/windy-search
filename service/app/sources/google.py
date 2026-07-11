@@ -61,6 +61,12 @@ class GoogleSource(Source):
         return 30  # last-resort per master plan §4 P1
 
     @property
+    def is_fallback(self) -> bool:
+        # Last-resort per §4 P1: only queried when the primaries return
+        # nothing — never adds Google's $0.005 to a healthy Brave query.
+        return True
+
+    @property
     def cost_per_query(self) -> Decimal:
         # Google's Custom Search JSON API standard tier ≈ $5 / 1000 queries.
         return Decimal("0.005")

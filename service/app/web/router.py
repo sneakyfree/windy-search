@@ -22,12 +22,17 @@ from app.auth.ept import PassportClaims
 from app.config import get_settings
 from app.eii import cost_cap, result_cache
 from app.eternitas_client import EternitasClient
-from app.web.browserbase import BrowserbaseRenderer, looks_like_needs_render
+from app.web.browserbase import looks_like_needs_render
 from app.web.extract import extract_structured_data
 from app.web.fetch import (
     MAX_BYTES_FETCH,
     UnsafeURLError,
     fetch_url,
+)
+from app.web.render_chain import (
+    AllBackendsFailedError,
+    chain_has_configured,
+    render_with_failover,
 )
 from app.web.search import search
 
@@ -251,8 +256,15 @@ class FetchResponseModel(BaseModel):
     budget_cap_usd: float | None = None
 
 
+def _bearer_token(request: Request) -> str | None:
+    """The caller's raw EPT, forwarded to the Windy Hand backend so the
+    fleet's own gate/meter/integrity events see the true passport."""
+    auth = request.headers.get("authorization") or ""
+    return auth[len("Bearer "):] if auth.startswith("Bearer ") else None
+
+
 async def _charge_browse_topup(request: Request, claims: PassportClaims):
-    """Charge web.browse ($0.05) when a fetch escalates to a Browserbase render.
+    """Charge web.browse ($0.05) when a fetch escalates to a render.
 
     The route dependency charged web.fetch (1 microcent) before the handler
     knew a render would happen — without this top-up, renders bill as plain
@@ -261,6 +273,14 @@ async def _charge_browse_topup(request: Request, claims: PassportClaims):
     cap/warning parameters the dependency stashed on request.state; returns
     the CostDecision (caller gates + refunds on skip/failure), or None when
     the dependency didn't run (fail-open, matching B.9 posture).
+
+    In a FAILOVER chain we don't know which backend will serve until after
+    the render, so this charges web.browse PESSIMISTICALLY as the budget
+    gate (worst case = a Browserbase serve at $0.05). The single-meter rule
+    (ADR-WH-001) is applied AFTER the render by `_settle_single_meter`: if
+    our own Windy Hand fleet served, it already charged `web.render` on the
+    same forwarded EPT, so we refund this web.browse; a fall-through to
+    Browserbase keeps the charge.
     """
     cap_usd = getattr(request.state, "cost_cap_usd", None)
     if cap_usd is None:
@@ -273,6 +293,28 @@ async def _charge_browse_topup(request: Request, claims: PassportClaims):
         cap_usd=cap_usd,
         warning_pct=getattr(request.state, "cost_warning_pct", 0.80),
     )
+
+
+def _render_chain(request: Request) -> list:
+    """The ordered failover chain. Falls back to a single `render_backend`
+    when no chain is set (keeps existing tests / callers working)."""
+    chain = getattr(request.app.state, "render_chain", None)
+    if chain is not None:
+        return chain
+    single = getattr(request.app.state, "render_backend", None)
+    return [single] if single is not None else []
+
+
+async def _settle_single_meter(request, claims, browse_decision, served_via):
+    """Apply the single-meter rule after a render: if our own fleet served,
+    it charged web.render on the forwarded EPT — refund the pessimistic
+    web.browse so the render isn't billed twice. Returns the (possibly
+    cleared) browse_decision for the budget fields."""
+    if served_via == "windy-hand" and browse_decision is not None:
+        redis = getattr(request.app.state, "redis", None)
+        await cost_cap.refund(redis, claims.passport, "web.browse")
+        return None
+    return browse_decision
 
 
 @router.post("/fetch", response_model=FetchResponseModel)
@@ -298,15 +340,20 @@ async def web_fetch(
       - Network/timeout → 502
     """
     redis = getattr(request.app.state, "redis", None)
-    renderer: BrowserbaseRenderer | None = getattr(
-        request.app.state, "browserbase_renderer", None
-    )
+    # The render slot (ADR-WH-001) is an ordered failover chain: try each
+    # configured backend in priority order, fall through on failure. main.py
+    # builds it from RENDER_BACKENDS at lifespan.
+    chain = _render_chain(request)
+    chain_ready = chain_has_configured(chain)
 
-    # render="on" needs a configured Browserbase key; fail clearly if not.
-    if body.render == "on" and (renderer is None or not renderer.is_configured()):
+    # render="on" needs at least one configured backend; fail clearly if not.
+    if body.render == "on" and not chain_ready:
         raise HTTPException(
             status_code=503,
-            detail="render='on' requires Browserbase (BROWSERBASE_API_KEY not configured)",
+            detail=(
+                "render='on' requires a configured render backend "
+                "(RENDER_BACKENDS + WINDY_HAND_BASE_URL / BROWSERBASE_API_KEY)"
+            ),
         )
 
     # B.10 — cache key includes pagination so /fetch?offset=0 and offset=100
@@ -360,7 +407,8 @@ async def web_fetch(
             **_budget_fields(request),
         )
 
-    # rendered_via is None for the plain path, "browserbase" once we render.
+    # rendered_via is None for the plain path; the backend's `via` tag
+    # ("windy-hand" | "browserbase") once we render.
     rendered_via: str | None = None
     # The web.browse top-up decision, kept only when a render actually
     # happened (refunded charges must not feed the budget fields).
@@ -389,14 +437,20 @@ async def web_fetch(
                 },
             )
         try:
-            result = await renderer.render(body.url)
-            rendered_via = "browserbase"
-        except Exception as e:
-            # Render never happened — don't keep the premium charge.
+            result, rendered_via, _fellback = await render_with_failover(
+                chain, body.url, ept=_bearer_token(request)
+            )
+        except AllBackendsFailedError as e:
+            # No backend served — don't keep the premium charge.
             if browse_decision is not None:
                 await cost_cap.refund(redis, claims.passport, "web.browse")
                 browse_decision = None
             raise HTTPException(status_code=502, detail=f"render failed: {e}")
+        # Single meter: if our own fleet served, it charged web.render on the
+        # forwarded EPT — refund the pessimistic web.browse.
+        browse_decision = await _settle_single_meter(
+            request, claims, browse_decision, rendered_via
+        )
     else:
         # Plain fetch first (render="off" stops here; "auto" may escalate).
         try:
@@ -414,13 +468,13 @@ async def web_fetch(
         except httpx.HTTPError as e:
             raise HTTPException(status_code=502, detail=f"upstream network error: {e}")
 
-        # render="auto": escalate to a real browser only if the plain result
-        # looks like an unhydrated SPA shell or a bot-wall, and Browserbase is
-        # configured. Any render failure falls back to the plain result.
+        # render="auto": escalate to the render chain only if the plain
+        # result looks like an unhydrated SPA shell or a bot-wall, and a
+        # backend is configured. Any total render failure falls back to the
+        # plain result (the fly still gets something).
         if (
             body.render == "auto"
-            and renderer is not None
-            and renderer.is_configured()
+            and chain_ready
             and looks_like_needs_render(result)
         ):
             browse_decision = await _charge_browse_topup(request, claims)
@@ -436,9 +490,13 @@ async def web_fetch(
                 )
             else:
                 try:
-                    result = await renderer.render(body.url)
-                    rendered_via = "browserbase"
-                except Exception as e:
+                    result, rendered_via, _fellback = await render_with_failover(
+                        chain, body.url, ept=_bearer_token(request)
+                    )
+                    browse_decision = await _settle_single_meter(
+                        request, claims, browse_decision, rendered_via
+                    )
+                except AllBackendsFailedError as e:
                     if browse_decision is not None:
                         await cost_cap.refund(redis, claims.passport, "web.browse")
                         browse_decision = None

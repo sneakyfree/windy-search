@@ -76,6 +76,15 @@ class Source(ABC):
         return False when the key is missing — the router skips them."""
         return True
 
+    @property
+    def is_fallback(self) -> bool:
+        """Fallback sources are NOT queried on every request — the router
+        calls them only when every primary source came back empty (bridge
+        outage, credit exhaustion, auth failure). Keeps the per-query cost
+        at one bridge in the happy path while ending the silent-empty
+        failure mode (G7). Default False = primary."""
+        return False
+
     @abstractmethod
     async def search(self, query: str, **opts: Any) -> list[RawResult]:
         """Issue the query.

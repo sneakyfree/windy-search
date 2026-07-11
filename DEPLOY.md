@@ -60,7 +60,16 @@ ETERNITAS_PLATFORM_API_KEY=et_plt_REDACTED
 ETERNITAS_WEBHOOK_SECRET=REDACTED
 
 # Search bridges (M2+)
-BRAVE_SEARCH_API_KEY=REDACTED        # falls back to DDG when unset
+BRAVE_SEARCH_API_KEY=REDACTED        # source dormant when unset (honest empty; NO keyless fallback)
+
+# G7 fallback bridge — Google Custom Search (last-resort per ADR-014 §4 P1).
+# The router queries Google ONLY when every primary source returns empty
+# (Brave credit exhaustion / auth failure / outage), so keying this does
+# NOT add Google's $0.005/query to healthy Brave-served queries. Both
+# values required; either missing → source dormant.
+# See "Keying the Google CSE fallback" below.
+GOOGLE_SEARCH_API_KEY=REDACTED
+GOOGLE_CSE_ID=REDACTED
 
 # /web/extract — Anthropic OAuth (Grant's Max sub, dogfood only)
 ANTHROPIC_OAUTH_TOKEN=sk-ant-oat01-REDACTED
@@ -74,6 +83,28 @@ MONTHLY_COST_WARNING_PCT=0.80
 Per memory `reference_lockbox.md`, all REDACTED values live in `~/kit-army-config/secrets/`. Pull from there into the EC2 host via SSM Parameter Store, never via git.
 
 Per memory `feedback_pydantic_settings_list_env.md`, do NOT override `CORS_ORIGINS` via env — `pydantic-settings` JSON-decodes list-typed env vars and a comma-separated value crashes boot. The default list in `app/config.py` is correct for prod; leave it alone.
+
+### Keying the Google CSE fallback (G7 — needs a human with console access, ~5 min)
+
+Autonomous keying was attempted 2026-07-11 and is NOT possible: creating a
+Programmable Search Engine requires an interactive Google console session,
+Grant's existing Google API key is API-restricted (customsearch blocked),
+and every clone-account key is suspended. Steps for whoever holds the
+Google account:
+
+1. Create a Programmable Search Engine at
+   https://programmablesearchengine.google.com → "Add" → enable
+   **Search the entire web**. Copy the **Search engine ID** → `GOOGLE_CSE_ID`.
+2. In Google Cloud console, pick/create a project, enable **Custom Search
+   API**, create an **API key** restricted to that API → `GOOGLE_SEARCH_API_KEY`.
+   (Free tier: 100 queries/day; beyond that ~$5/1000, cap 10k/day.)
+3. Store both in the lockbox (`~/kit-army-config/secrets/`), then add them
+   to `/opt/windy-search/deploy-prod/.env.production` and rebuild:
+   the fallback lights up when `GET /health/ready` shows
+   `fallback_sources_configured: 1`.
+4. Smoke: with a deliberately broken `BRAVE_SEARCH_API_KEY` in a LOCAL run,
+   `/v1/search` should return Google results + emit `search.fallback_used`.
+   Never break the prod Brave key to test.
 
 ---
 
