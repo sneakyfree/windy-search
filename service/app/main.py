@@ -276,17 +276,24 @@ def create_app() -> FastAPI:
                 redis_ok = False
 
         search_router = getattr(app.state, "search_router", None)
-        sources_configured = (
-            sum(1 for s in search_router.sources if s.is_configured())
+        configured = (
+            [s for s in search_router.sources if s.is_configured()]
             if search_router is not None
-            else 0
+            else []
         )
+        sources_configured = len(configured)
+        # G7 — surface the fallback tier: 0 fallbacks means a Brave
+        # outage/exhaustion turns every agent web_search into a silent
+        # empty. Not gating (primary-only is still "ready"), but visible.
+        fallback_sources_configured = sum(1 for s in configured if s.is_fallback)
 
         ready = redis_ok and sources_configured > 0
         return {
             "status": "ready" if ready else "degraded",
             "redis": redis_ok,
             "sources_configured": sources_configured,
+            "primary_sources_configured": sources_configured - fallback_sources_configured,
+            "fallback_sources_configured": fallback_sources_configured,
         }
 
     @app.get("/whoami")
