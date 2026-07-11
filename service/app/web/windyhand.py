@@ -11,9 +11,10 @@ this backend is dormant (`is_configured()` False) — the exact
 Auth: the CALLER's EPT is forwarded verbatim, so windy-hand's own
 EPT gate, per-passport rate limit, and web.render cost meter see the
 true passport, and its integrity events attribute to the real agent.
-(Reconciling the two services' meters — search charges web.browse,
-hand charges web.render — is an open item tracked in the integration
-PR, not in this module.)
+(The two services' meters are reconciled in the router, not here:
+`_settle_single_meter` refunds search's pessimistic web.browse charge
+when this backend served the render, so the caller pays hand's
+web.render only — never both.)
 
 Honesty note (P8): windy-hand renders with an honest WindyHandBot user
 agent and respects robots.txt as hard defaults. A robots-disallowed
