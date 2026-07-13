@@ -35,8 +35,10 @@ from app.config import get_settings
 from app.eii.score_cache import IntegrityScoreCache
 from app.eii.tiers import tier_for_score
 from app.eternitas_client import EternitasClient
+from app.ops_log import ops_log
 from app.router import Router
 from app.routes.admin_budget import router as admin_budget_router
+from app.routes.ops import router as ops_router
 from app.routes.version import router as version_router
 from app.sources.brave import BraveSource
 from app.sources.google import GoogleSource
@@ -54,6 +56,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    ops_log("info", "server_start")
 
     # Redis is optional in B.1 — when None, rate limiting + cache are
     # silently disabled in later codons. Matches eternitas's posture.
@@ -338,6 +341,7 @@ def create_app() -> FastAPI:
     app.include_router(v1_router)
     app.include_router(version_router)
     app.include_router(admin_budget_router)
+    app.include_router(ops_router)
 
     return app
 
