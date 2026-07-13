@@ -1,0 +1,64 @@
+{
+  "contract": "ops.mcp.v1",
+  "doctrine": "ADR-060 v1.0",
+  "product": "windy-search",
+  "class": "cloud",
+  "mcp_protocol": "2025-06-18",
+  "$comment": "Windy Search ops surface — Class C (cloud), replicates the Mind pattern. The PRODUCT API (/v1/search, /v1/fetch, /v1/extract) is Search's reason to exist and stays OUT of this contract per §2; this is the ops/healing + agent-self-diagnostic surface on https://api.windysearch.com. Reads bound via transport. Search is EPT-gated end to end, so even the self-diagnostics carry the caller's passport. baseline_mapping tracks the healing baseline; gaps (config/logs/redeploy) are the punch list, not advertised.",
+  "baseline_mapping": {
+    "get_health": { "status": "implemented", "maps_to": "GET /health" },
+    "get_status": { "status": "implemented", "maps_to": "GET /version" },
+    "get_capabilities": { "status": "implemented", "maps_to": "GET /health/ready", "note": "reports configured search sources — a search service with zero bridges is degraded (found live 2026-07-06); this IS the capability probe." },
+    "get_config": { "status": "gap", "note": "no config-read endpoint; providers are env-at-deploy." },
+    "get_logs": { "status": "gap", "note": "no content-free logs endpoint yet." },
+    "run_selftest": { "status": "gap", "note": "/health/ready checks Redis + source count; a true selftest would run a canary search per source." },
+    "reconnect": { "status": "unsupported", "note": "stateless cloud service; nothing to reconnect." },
+    "restart_app": { "status": "gap", "note": "out-of-band (systemd/Caddy); ops plane outside the patient." },
+    "enter_safe_mode": { "status": "unsupported", "note": "stateless; degraded-mode is reported by /health/ready, not toggled." },
+    "exit_safe_mode": { "status": "unsupported" },
+    "set_setting": { "status": "gap", "note": "no runtime-config mutation; source keys are env-at-deploy." },
+    "check_for_update": { "status": "gap", "note": "wire to the Steamroller fleet version manifest (L2)." },
+    "apply_update": { "status": "gap", "note": "SSH-free health-gated redeploy hook; ops plane outside the patient; §7 (Actions billing-lock)." },
+    "reset_to_defaults": { "status": "unsupported", "note": "stateless service — no user state to reset." }
+  },
+  "tools": [
+    {
+      "name": "get_health",
+      "tier": "auto_allow",
+      "baseline_status": "implemented",
+      "description": "The FIRST call when Windy Search seems down. Liveness of the search service: returns ok + service + version + environment if the process is up.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "transport": { "method": "GET", "path": "/health" }
+    },
+    {
+      "name": "get_status",
+      "tier": "auto_allow",
+      "baseline_status": "implemented",
+      "description": "Read Windy Search's deployment identity — which build is serving right now. Use this to check whether a fix that was meant to deploy is actually live.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "transport": { "method": "GET", "path": "/version" }
+    },
+    {
+      "name": "get_capabilities",
+      "tier": "auto_allow",
+      "baseline_status": "implemented",
+      "description": "Report whether Windy Search is actually READY to serve — is Redis reachable, and how many search sources are wired up. A search service with zero configured sources returns empty results while looking 'alive'; this is the honest capability probe that catches that.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "transport": { "method": "GET", "path": "/health/ready" }
+    },
+    {
+      "name": "whoami",
+      "tier": "auto_allow",
+      "description": "Show the passport Windy Search sees for the calling agent — the parsed EPT claims. Use this to diagnose 'it says I'm not who I am' or auth confusion.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "transport": { "method": "GET", "path": "/whoami" }
+    },
+    {
+      "name": "get_integrity_budget",
+      "tier": "auto_allow",
+      "description": "Show the calling agent's current integrity (EII) tier and its remaining rate-limit budget at Windy Search. Use this to answer 'why am I being throttled' or 'how many more searches can I do right now'.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "transport": { "method": "GET", "path": "/integrity" }
+    }
+  ]
+}
