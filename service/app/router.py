@@ -29,6 +29,7 @@ import httpx
 
 from app import telemetry
 from app.dedup import dedup_across_sources
+from app.ops_log import categorize_status, ops_log
 from app.merge import apply_per_source_cap
 from app.normalization import normalize
 from app.privacy import rewrite_query
@@ -268,9 +269,13 @@ async def _safe_search(source: Source, query: str, cap: int) -> list[RawResult]:
         if status_code in _DEGRADED_STATUSES:
             _alert_bridge_degraded(source, status_code)
         logger.warning("router source=%s failed: %s", source.name, e)
+        # ADR-060 get_logs ring — categorized, never the raw error (bridge
+        # bodies can echo the query text).
+        ops_log("error", "source_error", f"{source.name}:{categorize_status(status_code)}")
         return []
     except Exception as e:  # noqa: BLE001 — bridges may raise anything
         logger.warning("router source=%s failed: %s", source.name, e)
+        ops_log("error", "source_error", f"{source.name}:exception")
         return []
 
 

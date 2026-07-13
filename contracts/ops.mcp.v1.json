@@ -4,21 +4,21 @@
   "product": "windy-search",
   "class": "cloud",
   "mcp_protocol": "2025-06-18",
-  "$comment": "Windy Search ops surface — Class C (cloud), replicates the Mind pattern. The PRODUCT API (/v1/search, /v1/fetch, /v1/extract) is Search's reason to exist and stays OUT of this contract per §2; this is the ops/healing + agent-self-diagnostic surface on https://api.windysearch.com. Reads bound via transport. Search is EPT-gated end to end, so even the self-diagnostics carry the caller's passport. baseline_mapping tracks the healing baseline; gaps (config/logs/redeploy) are the punch list, not advertised.",
+  "$comment": "Windy Search ops surface — Class C (cloud), replicates the Mind pattern. The PRODUCT API (/v1/search, /v1/fetch, /v1/extract) is Search's reason to exist and stays OUT of this contract per §2; this is the ops/healing + agent-self-diagnostic surface on https://api.windysearch.com. Reads bound via transport. Search is EPT-gated end to end, so even the self-diagnostics carry the caller's passport. Rev 2026-07-13 (gap-closing, replicating windy-mind #60): get_logs + get_config + run_selftest SHIPPED as the /ops/* trio (EPT-required). get_logs is content-free BY CONSTRUCTION (fixed event vocabulary; bridge failures categorized — error bodies can echo query text, never stored raw). run_selftest runs ONE real canary query through the router's normal path (all configured sources, merge, dedup) and caches its verdict 300s — Brave/Google are METERED, so polling must not drain a bridge budget; payload uses `passed`, never top-level `ok` (invoke-envelope rule). Remaining gaps (set_setting, apply_update, restart_app): the windy-mind ops-hook pattern (windy-mind #61) generalizes — port it per-host when Search's turn comes. DEPLOY STATUS: merged; live after the Grant-gated deploy — probe before trusting mid-incident.",
   "baseline_mapping": {
     "get_health": { "status": "implemented", "maps_to": "GET /health" },
     "get_status": { "status": "implemented", "maps_to": "GET /version" },
     "get_capabilities": { "status": "implemented", "maps_to": "GET /health/ready", "note": "reports configured search sources — a search service with zero bridges is degraded (found live 2026-07-06); this IS the capability probe." },
-    "get_config": { "status": "gap", "note": "no config-read endpoint; providers are env-at-deploy." },
-    "get_logs": { "status": "gap", "note": "no content-free logs endpoint yet." },
-    "run_selftest": { "status": "gap", "note": "/health/ready checks Redis + source count; a true selftest would run a canary search per source." },
+    "get_config": { "status": "implemented", "maps_to": "GET /ops/config", "note": "per-source configured/fallback booleans + redis/integrity/telemetry/render wiring, secrets fully redacted — closed 2026-07-13." },
+    "get_logs": { "status": "implemented", "maps_to": "GET /ops/logs", "note": "content-free ring, fixed vocabulary; bridge failures categorized — closed 2026-07-13." },
+    "run_selftest": { "status": "implemented", "maps_to": "POST /ops/selftest", "note": "one real canary query via the router's normal path, counts-only verdict, 300s cache (metered bridges) — closed 2026-07-13." },
     "reconnect": { "status": "unsupported", "note": "stateless cloud service; nothing to reconnect." },
-    "restart_app": { "status": "gap", "note": "out-of-band (systemd/Caddy); ops plane outside the patient." },
+    "restart_app": { "status": "gap", "note": "out-of-band; port the windy-mind ops-hook (windy-mind #61 — out-of-patient systemd unit, bearer + confirm nonce) to this host." },
     "enter_safe_mode": { "status": "unsupported", "note": "stateless; degraded-mode is reported by /health/ready, not toggled." },
     "exit_safe_mode": { "status": "unsupported" },
     "set_setting": { "status": "gap", "note": "no runtime-config mutation; source keys are env-at-deploy." },
     "check_for_update": { "status": "gap", "note": "wire to the Steamroller fleet version manifest (L2)." },
-    "apply_update": { "status": "gap", "note": "SSH-free health-gated redeploy hook; ops plane outside the patient; §7 (Actions billing-lock)." },
+    "apply_update": { "status": "gap", "note": "SSH-free health-gated redeploy; §7. The windy-mind ops-hook (#61: rebuild + last-good rollback + sha attestation) is the pattern to port to this host." },
     "reset_to_defaults": { "status": "unsupported", "note": "stateless service — no user state to reset." }
   },
   "tools": [
@@ -59,6 +59,64 @@
       "description": "Show the calling agent's current integrity (EII) tier and its remaining rate-limit budget at Windy Search. Use this to answer 'why am I being throttled' or 'how many more searches can I do right now'.",
       "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
       "transport": { "method": "GET", "path": "/integrity" }
+    },
+    {
+      "name": "get_logs",
+      "tier": "auto_allow",
+      "baseline_status": "implemented",
+      "description": "Read Windy Search's recent operational events — server starts, per-source bridge failures by category (quota exhausted, auth/billing, upstream errors), and self-test results. Content-free by construction: the log can only ever hold fixed event names and category codes, never a query, a result, or a raw bridge error. Requires your passport.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "count": { "type": "number" },
+          "entries": { "type": "array", "description": "[{ts, level, event, code?}] — fixed vocabulary only" }
+        }
+      },
+      "transport": { "method": "GET", "path": "/ops/logs" }
+    },
+    {
+      "name": "get_config",
+      "tier": "auto_allow",
+      "baseline_status": "implemented",
+      "description": "Read Windy Search's effective runtime configuration with every secret redacted to a boolean: which search sources actually hold keys (and which are fallbacks), whether Redis, Eternitas integrity-reporting, telemetry, and the page-render chain are wired. Use this when 'search returns nothing' — a service with zero configured sources looks alive but is empty. Requires your passport.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "environment": { "type": "string" },
+          "sources": { "type": "object", "description": "{source: {configured, fallback}} — never key material" },
+          "sources_configured": { "type": "number" },
+          "redis_configured": { "type": "boolean" },
+          "integrity_reporting_configured": { "type": "boolean" },
+          "telemetry_configured": { "type": "boolean" },
+          "render_backends": { "type": "array" }
+        }
+      },
+      "transport": { "method": "GET", "path": "/ops/config" }
+    },
+    {
+      "name": "run_selftest",
+      "tier": "auto_allow",
+      "baseline_status": "implemented",
+      "description": "Actively exercise Windy Search's real core path: one canary query routed through every configured source exactly the way an agent's search would be (fan-out, merge, dedup). Reports pass/fail per stage with result COUNTS, which bridges answered, and latency — never the results themselves. The verdict is cached for 5 minutes because search bridges are metered: polling this cannot drain a bridge budget. Requires your passport.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "max_results": { "type": "number", "description": "Canary result cap, 1-5 (default 3)." }
+        },
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "passed": { "type": "boolean", "description": "true only when every stage passed ('passed', not 'ok' — top-level ok is reserved for the invoke envelope)" },
+          "stages": { "type": "array", "description": "[{name: config|search, ok, detail}] — counts/bridges/latency, never result content" },
+          "duration_ms": { "type": "number" },
+          "cached": { "type": "boolean" }
+        }
+      },
+      "transport": { "method": "POST", "path": "/ops/selftest" }
     }
   ]
 }
