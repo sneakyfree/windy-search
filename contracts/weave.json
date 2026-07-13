@@ -1,0 +1,7 @@
+{
+  "product": "windy-search",
+  "class": "cloud",
+  "http": {"base_default": "https://api.windysearch.com", "base_env": "WINDY_SEARCH_API_URL"},
+  "auth": {"kind": "ept", "token_env": "WINDY_EPT"},
+  "package": {"name": "windy-search-mcp", "version": "0.1.0-loom-preview", "description": "Windy Search ops MCP — Loom-generated Class C shim (stdio + streamable HTTP)."}
+}
