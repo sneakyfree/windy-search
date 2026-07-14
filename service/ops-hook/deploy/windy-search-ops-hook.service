@@ -1,0 +1,28 @@
+# windy-search ops-hook — the doctor that is NOT in the patient (ADR-060 §3.6).
+# Runs OUTSIDE the compose project so it can heal a dead/wedged search-api.
+#
+# Install (Grant-gated; see service/ops-hook/README.md):
+#   sudo mkdir -p /opt/windy-search-ops-hook
+#   sudo cp service/ops-hook/hook.py /opt/windy-search-ops-hook/
+#   sudo install -m 0600 service/ops-hook/deploy/ops-hook.env.example /etc/windy-search-ops-hook.env
+#   sudo nano /etc/windy-search-ops-hook.env      # set OPS_HOOK_TOKEN; verify OPS_HOOK_IMAGE_REF
+#   sudo cp service/ops-hook/deploy/windy-search-ops-hook.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now windy-search-ops-hook
+
+[Unit]
+Description=windy-search ops-hook (ADR-060 out-of-patient healing endpoint)
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/windy-search-ops-hook/hook.py
+EnvironmentFile=/etc/windy-search-ops-hook.env
+Restart=always
+RestartSec=3
+# Needs docker + the deploy-prod env file; runs as root like the manual
+# deploy it replaces. Loopback bind + bearer + confirm nonce are the wall.
+User=root
+
+[Install]
+WantedBy=multi-user.target
