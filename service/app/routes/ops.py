@@ -19,6 +19,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
@@ -30,6 +31,56 @@ from app.ops_log import OPS_LOG_MAX, entries, ops_log
 from app.types import SearchRequest
 
 router = APIRouter(tags=["ops"])
+
+
+# ── Steamroller: check_for_update ─────────────────────────────────────
+# Semver-lenient compare (mirrors windy-contracts loom/discovery.py so the
+# whole fleet agrees on what "newer" means).
+def _semver_tuple(v: str) -> tuple:
+    out = []
+    for part in str(v).replace("-", ".").split("."):
+        out.append((0, int(part)) if part.isdigit() else (1, part))
+    return tuple(out)
+
+
+def _compare(installed: str, current: str, minimum: str | None) -> str:
+    try:
+        if minimum and _semver_tuple(installed) < _semver_tuple(minimum):
+            return "must-update"
+        if _semver_tuple(installed) < _semver_tuple(current):
+            return "update-available"
+        return "current"
+    except Exception:
+        return "unknown"
+
+
+async def _resolve_update(installed: str, settings) -> dict[str, Any]:
+    result: dict[str, Any] = {"service": settings.fleet_product, "installed": installed,
+                              "status": "unknown"}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as client:
+            resp = await client.get(settings.fleet_versions_url)
+        if resp.status_code != 200:
+            result["detail"] = f"fleet manifest http {resp.status_code}"
+            return result
+        manifest = resp.json()
+    except Exception as e:
+        result["detail"] = f"fleet manifest unreachable: {type(e).__name__}"
+        return result
+    chan = (manifest.get("products", {}).get(settings.fleet_product, {})
+            .get("channels", {}).get(settings.fleet_channel))
+    if not chan or not chan.get("current"):
+        result["detail"] = "no fleet-version entry for this product/channel"
+        return result
+    status = _compare(installed, chan["current"], chan.get("minimum"))
+    result.update(status=status, current=chan["current"], minimum=chan.get("minimum"),
+                  kind=chan.get("kind"), source=chan.get("source"), notes=chan.get("notes"))
+    if status in ("update-available", "must-update"):
+        result["remediation"] = (
+            "call apply_update (the ops-hook redeploy, always_confirm) to move "
+            f"from {installed} to {chan['current']}"
+        )
+    return result
 
 SERVICE_NAME = "windy-search"
 
@@ -45,6 +96,15 @@ def reset_selftest_cache_for_tests() -> None:
     global _selftest_cache, _selftest_expiry
     _selftest_cache = None
     _selftest_expiry = 0.0
+
+
+@router.get("/ops/check-update")
+async def ops_check_update(_: PassportClaims = Depends(require_passport)) -> dict[str, Any]:
+    """Resolve this deployment's running version against admin's fleet-version
+    manifest (ADR-060 §5 Steamroller). Returns status + the literal
+    remediation. Read-only — apply_update (the ops-hook redeploy) is the
+    separate, always_confirm act."""
+    return await _resolve_update(__version__, get_settings())
 
 
 @router.get("/ops/logs")

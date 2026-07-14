@@ -140,3 +140,85 @@ async def test_selftest_verdict_cached(auth_client, ept):
         assert CountingRouter.calls == 1, "polling must not spend bridge quota"
     finally:
         app.state.search_router = None
+
+
+# ── check_for_update (Steamroller) ──────────────────────────────────────
+
+def _mock_fleet(monkeypatch, current, minimum=None, product="windy-search"):
+    chan = {"current": current, "kind": "image", "source": "windy-search-api:local", "notes": "t"}
+    if minimum:
+        chan["minimum"] = minimum
+    manifest = {"schema_version": "fleet-version.v1",
+                "products": {product: {"channels": {"stable": chan}}}}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return manifest
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            return _Resp()
+
+    import app.routes.ops as ops_mod
+    monkeypatch.setattr(ops_mod.httpx, "AsyncClient", _Client)
+
+
+@pytest.mark.asyncio
+async def test_check_update_requires_ept(client):
+    assert (await client.get("/ops/check-update")).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_check_update_current(auth_client, ept, monkeypatch):
+    from app import __version__
+    _mock_fleet(monkeypatch, current=__version__)
+    body = (await auth_client.get("/ops/check-update", headers=_auth(ept))).json()
+    assert body["status"] == "current" and "remediation" not in body
+
+
+@pytest.mark.asyncio
+async def test_check_update_available(auth_client, ept, monkeypatch):
+    _mock_fleet(monkeypatch, current="99.0.0")
+    body = (await auth_client.get("/ops/check-update", headers=_auth(ept))).json()
+    assert body["status"] == "update-available"
+    assert "apply_update" in body["remediation"]
+
+
+@pytest.mark.asyncio
+async def test_check_update_must_update(auth_client, ept, monkeypatch):
+    _mock_fleet(monkeypatch, current="99.0.0", minimum="99.0.0")
+    body = (await auth_client.get("/ops/check-update", headers=_auth(ept))).json()
+    assert body["status"] == "must-update"
+
+
+@pytest.mark.asyncio
+async def test_check_update_unreachable_is_honest(auth_client, ept, monkeypatch):
+    import app.routes.ops as ops_mod
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            raise ConnectionError("refused")
+
+    monkeypatch.setattr(ops_mod.httpx, "AsyncClient", _Boom)
+    body = (await auth_client.get("/ops/check-update", headers=_auth(ept))).json()
+    assert body["status"] == "unknown" and "unreachable" in body["detail"]
