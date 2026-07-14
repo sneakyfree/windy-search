@@ -21,8 +21,9 @@ def test_vendored_hook_present_and_canonical():
     assert VENDORED.exists(), "service/ops-hook/hook.py missing"
     text = VENDORED.read_text()
     # Canonical markers — the vendored file is the generic fleet hook, not a fork.
+    # (No version literal here: the canon bumps versions; byte-identity with the
+    # canon — the next test — is the guard that matters.)
     assert "windy ops-hook — the doctor that is NOT in the patient" in text
-    assert 'HOOK_VERSION = "2.0.0"' in text
     assert "OPS_HOOK_TOKEN" in text and "OPS_HOOK_COMPOSE_CMD" in text
     # The generic file must be env-driven, not hardcode Search's real config.
     # (The canonical docstring names sample values illustratively; the guard
