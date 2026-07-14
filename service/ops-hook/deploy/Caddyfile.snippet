@@ -1,0 +1,7 @@
+# Add inside the api.windysearch.com site block (Grant-gated live edit).
+# Routes ONLY /hook/* to the ops-hook; everything else keeps going to the
+# patient on 8510. The hook enforces bearer + confirm itself.
+#
+#   handle /hook/* {
+#       reverse_proxy 127.0.0.1:8901
+#   }
