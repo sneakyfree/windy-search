@@ -29,8 +29,11 @@ Configuration (systemd unit env file, 0600 — see deploy/ templates):
                             SUBSTRATE documents it, e.g.
                             "docker compose -p windysearch-prod --env-file .env.production".
   OPS_HOOK_SERVICE          compose service to operate on, e.g. "search-api".
-  OPS_HOOK_IMAGE_REF        image ref compose builds — VERIFY ON HOST
+  OPS_HOOK_IMAGE_REF        image ref compose builds/pulls — VERIFY ON HOST
                             (`docker compose ... images`), e.g. "windy-search-api:local".
+  OPS_HOOK_BUILD_MODE       "build" (default; rebuild in place from the host
+                            tree) or "pull" (fetch a new registry image, for
+                            ghcr-published services). Match how prod deploys.
   OPS_HOOK_ENV_FILE         absolute path of the env file /hook/config edits.
   OPS_HOOK_CONFIG_ALLOWLIST comma-separated settable keys (provider keys +
                             LOG_LEVEL class ONLY — never the hook token,
@@ -77,6 +80,11 @@ COMPOSE_CMD = shlex.split(
     os.environ.get("OPS_HOOK_COMPOSE_CMD", "docker compose")
 )
 SERVICE = os.environ.get("OPS_HOOK_SERVICE", "api")
+# How redeploy refreshes the image: "build" rebuilds in place from the
+# host tree (Mind/Search/admin/Clone — locally-built `:local` images);
+# "pull" fetches a new registry image (ghcr-published services). Set per
+# host to match how prod actually deploys.
+BUILD_MODE = os.environ.get("OPS_HOOK_BUILD_MODE", "build").strip().lower()
 IMAGE_REF = os.environ.get("OPS_HOOK_IMAGE_REF", "")
 LAST_GOOD_REF = (IMAGE_REF.rsplit(":", 1)[0] + ":last-good") if IMAGE_REF else ""
 ENV_FILE = os.environ.get("OPS_HOOK_ENV_FILE", "")
@@ -222,8 +230,12 @@ class OpsHook:
         if rc != 0:
             return self._verdict(stages)
 
-        rc, _ = self.runner(self._compose("build", SERVICE))
-        stages.append({"name": "build", "ok": rc == 0})
+        if BUILD_MODE == "pull":
+            rc, _ = self.runner(self._compose("pull", SERVICE))
+            stages.append({"name": "pull", "ok": rc == 0})
+        else:
+            rc, _ = self.runner(self._compose("build", SERVICE))
+            stages.append({"name": "build", "ok": rc == 0})
         if rc != 0:
             return self._verdict(stages)
 
