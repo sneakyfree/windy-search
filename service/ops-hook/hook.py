@@ -19,6 +19,11 @@ host-side half of the mutating baseline knobs:
                                           recreate, health-gate, auto-
                                           restore on a failed gate)
   restart_app   →  POST /hook/restart    (compose restart + health-gate)
+  reconnect.<s> →  POST /hook/restart-service {service}  (multi-service hosts:
+                                          restart ONE allowlisted sibling
+                                          service, gated on compose's own
+                                          service state — the aggregator's
+                                          read view informs which to pick)
 
 Configuration (systemd unit env file, 0600 — see deploy/ templates):
 
@@ -38,6 +43,11 @@ Configuration (systemd unit env file, 0600 — see deploy/ templates):
   OPS_HOOK_CONFIG_ALLOWLIST comma-separated settable keys (provider keys +
                             LOG_LEVEL class ONLY — never the hook token,
                             DATABASE_URL/REDIS_URL, or signing secrets).
+  OPS_HOOK_SERVICES         comma-separated sibling compose services this hook
+                            may restart individually (multi-service hosts like
+                            Chat). Empty → /hook/restart-service disabled. The
+                            per-service reconnect knob; distinct from SERVICE
+                            (the single build/config target).
   OPS_HOOK_PATIENT_URL      e.g. http://127.0.0.1:8500 (must serve /health, /version).
   OPS_HOOK_MIGRATE_CMD      optional, e.g. "alembic upgrade head" — run via
                             `compose exec -T <service> ...` after up; empty = skip.
@@ -71,7 +81,7 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-HOOK_VERSION = "2.0.0"
+HOOK_VERSION = "2.1.0"
 
 # ── Config (the systemd unit's env file, NOT the patient's) ───────────
 PRODUCT = os.environ.get("OPS_HOOK_PRODUCT", "windy-unknown")
@@ -92,6 +102,15 @@ CONFIG_KEY_ALLOWLIST = frozenset(
     k.strip()
     for k in os.environ.get("OPS_HOOK_CONFIG_ALLOWLIST", "").split(",")
     if k.strip()
+)
+# Multi-service hosts (Chat's ~13 services) — the sibling compose services
+# this hook may restart individually. Empty → /hook/restart-service disabled.
+# SERVICE (above) is still the single build/config target; this is the
+# broader set for the per-service reconnect knob.
+SERVICES_ALLOWLIST = frozenset(
+    s.strip()
+    for s in os.environ.get("OPS_HOOK_SERVICES", "").split(",")
+    if s.strip()
 )
 PATIENT_URL = os.environ.get("OPS_HOOK_PATIENT_URL", "http://127.0.0.1:8080")
 MIGRATE_CMD = shlex.split(os.environ.get("OPS_HOOK_MIGRATE_CMD", ""))
@@ -204,6 +223,44 @@ class OpsHook:
         if rc == 0:
             ok, detail = self._health_gate()
             stages.append({"name": "health_gate", "ok": ok, "detail": detail})
+        return self._verdict(stages)
+
+    def _service_up_gate(self, service: str) -> tuple[bool, str]:
+        """Poll `compose ps <service>` until it reports up. Uses compose's own
+        state (no HTTP/auth dependency) — the right gate for a sibling service
+        on a shared network that the host process can't reach directly."""
+        for _ in range(HEALTH_GATE_ATTEMPTS):
+            rc, out = self.runner(self._compose("ps", service))
+            low = out.lower()
+            if rc == 0 and ("exit" not in low and "restarting" not in low) \
+                    and ("running" in low or " up " in low or "up " in low):
+                return True, "running"
+            time.sleep(HEALTH_GATE_INTERVAL)
+        return False, "service_gate_timeout"
+
+    def op_restart_service(self, service: str) -> dict:
+        """Restart ONE named sibling service (multi-service hosts). This is
+        the per-service reconnect knob the aggregator's read view informs —
+        an agent sees `media: down`, restarts just media, leaves the other
+        twelve alone. Allowlisted; gated on compose's own service state."""
+        if not SERVICES_ALLOWLIST:
+            return self._verdict([{
+                "name": "config",
+                "ok": False,
+                "detail": "OPS_HOOK_SERVICES unset — per-service restart disabled on this host",
+            }])
+        if service not in SERVICES_ALLOWLIST:
+            return self._verdict([{
+                "name": "allowlist",
+                "ok": False,
+                "detail": f"service not restartable; allowed: {sorted(SERVICES_ALLOWLIST)}",
+            }])
+        stages = [{"name": "allowlist", "ok": True}]
+        rc, _ = self.runner(self._compose("restart", service))
+        stages.append({"name": "restart", "ok": rc == 0, "detail": service})
+        if rc == 0:
+            ok, detail = self._service_up_gate(service)
+            stages.append({"name": "service_gate", "ok": ok, "detail": detail})
         return self._verdict(stages)
 
     def op_redeploy(self, expected_sha: str | None) -> dict:
@@ -458,6 +515,7 @@ def make_handler(hook: OpsHook):
                     "service": f"{PRODUCT}-ops-hook",
                     "version": HOOK_VERSION,
                     "patient": hook.patient_health(),
+                    "restartable_services": sorted(SERVICES_ALLOWLIST),
                 })
                 return
             if not self._authed():
@@ -487,6 +545,11 @@ def make_handler(hook: OpsHook):
                 if self._confirmed(body):
                     key, value = str(body.get("key", "")), str(body.get("value", ""))
                     self._run_op(lambda: hook.op_config(key, value))
+                return
+            if self.path == "/hook/restart-service":
+                if self._confirmed(body):
+                    service = str(body.get("service", ""))
+                    self._run_op(lambda: hook.op_restart_service(service))
                 return
             self._send(404, {"ok": False, "error": "not_found"})
 
