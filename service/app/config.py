@@ -103,6 +103,13 @@ class Settings(BaseSettings):
     windy_admin_ingest_url: str | None = None
     windy_admin_ingest_token: str | None = None
 
+    # --- Steamroller (ADR-060 §5) — check_for_update resolves this
+    # deployment's version against admin's fleet-version manifest. Public,
+    # content-free; overridable for tests / a private admin host.
+    fleet_versions_url: str = "https://admin.windyword.ai/v1/fleet-versions"
+    fleet_product: str = "windy-search"
+    fleet_channel: str = "stable"
+
     # --- Thin admin API (Windy Admin Phase 3) -----------------------------
     # Bearer for /admin/budget-cap/*. Caller is windy-admin only; RBAC +
     # audit live there. Unset = admin API disabled (503).

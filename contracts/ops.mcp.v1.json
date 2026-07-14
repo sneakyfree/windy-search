@@ -6,20 +6,66 @@
   "mcp_protocol": "2025-06-18",
   "$comment": "Windy Search ops surface — Class C (cloud), replicates the Mind pattern. The PRODUCT API (/v1/search, /v1/fetch, /v1/extract) is Search's reason to exist and stays OUT of this contract per §2; this is the ops/healing + agent-self-diagnostic surface on https://api.windysearch.com. Reads bound via transport. Search is EPT-gated end to end, so even the self-diagnostics carry the caller's passport. Rev 2026-07-13 (gap-closing, replicating windy-mind #60): get_logs + get_config + run_selftest SHIPPED as the /ops/* trio (EPT-required). get_logs is content-free BY CONSTRUCTION (fixed event vocabulary; bridge failures categorized — error bodies can echo query text, never stored raw). run_selftest runs ONE real canary query through the router's normal path (all configured sources, merge, dedup) and caches its verdict 300s — Brave/Google are METERED, so polling must not drain a bridge budget; payload uses `passed`, never top-level `ok` (invoke-envelope rule). Remaining gaps (set_setting, apply_update, restart_app): the windy-mind ops-hook pattern (windy-mind #61) generalizes — port it per-host when Search's turn comes. DEPLOY STATUS: merged; live after the Grant-gated deploy — probe before trusting mid-incident.",
   "baseline_mapping": {
-    "get_health": { "status": "implemented", "maps_to": "GET /health" },
-    "get_status": { "status": "implemented", "maps_to": "GET /version" },
-    "get_capabilities": { "status": "implemented", "maps_to": "GET /health/ready", "note": "reports configured search sources — a search service with zero bridges is degraded (found live 2026-07-06); this IS the capability probe." },
-    "get_config": { "status": "implemented", "maps_to": "GET /ops/config", "note": "per-source configured/fallback booleans + redis/integrity/telemetry/render wiring, secrets fully redacted — closed 2026-07-13." },
-    "get_logs": { "status": "implemented", "maps_to": "GET /ops/logs", "note": "content-free ring, fixed vocabulary; bridge failures categorized — closed 2026-07-13." },
-    "run_selftest": { "status": "implemented", "maps_to": "POST /ops/selftest", "note": "one real canary query via the router's normal path, counts-only verdict, 300s cache (metered bridges) — closed 2026-07-13." },
-    "reconnect": { "status": "unsupported", "note": "stateless cloud service; nothing to reconnect." },
-    "restart_app": { "status": "gap", "note": "out-of-band; port the windy-mind ops-hook (windy-mind #61 — out-of-patient systemd unit, bearer + confirm nonce) to this host." },
-    "enter_safe_mode": { "status": "unsupported", "note": "stateless; degraded-mode is reported by /health/ready, not toggled." },
-    "exit_safe_mode": { "status": "unsupported" },
-    "set_setting": { "status": "gap", "note": "no runtime-config mutation; source keys are env-at-deploy." },
-    "check_for_update": { "status": "gap", "note": "wire to the Steamroller fleet version manifest (L2)." },
-    "apply_update": { "status": "gap", "note": "SSH-free health-gated redeploy; §7. The windy-mind ops-hook (#61: rebuild + last-good rollback + sha attestation) is the pattern to port to this host." },
-    "reset_to_defaults": { "status": "unsupported", "note": "stateless service — no user state to reset." }
+    "get_health": {
+      "status": "implemented",
+      "maps_to": "GET /health"
+    },
+    "get_status": {
+      "status": "implemented",
+      "maps_to": "GET /version"
+    },
+    "get_capabilities": {
+      "status": "implemented",
+      "maps_to": "GET /health/ready",
+      "note": "reports configured search sources — a search service with zero bridges is degraded (found live 2026-07-06); this IS the capability probe."
+    },
+    "get_config": {
+      "status": "implemented",
+      "maps_to": "GET /ops/config",
+      "note": "per-source configured/fallback booleans + redis/integrity/telemetry/render wiring, secrets fully redacted — closed 2026-07-13."
+    },
+    "get_logs": {
+      "status": "implemented",
+      "maps_to": "GET /ops/logs",
+      "note": "content-free ring, fixed vocabulary; bridge failures categorized — closed 2026-07-13."
+    },
+    "run_selftest": {
+      "status": "implemented",
+      "maps_to": "POST /ops/selftest",
+      "note": "one real canary query via the router's normal path, counts-only verdict, 300s cache (metered bridges) — closed 2026-07-13."
+    },
+    "reconnect": {
+      "status": "unsupported",
+      "note": "stateless cloud service; nothing to reconnect."
+    },
+    "restart_app": {
+      "status": "gap",
+      "note": "out-of-band; port the windy-mind ops-hook (windy-mind #61 — out-of-patient systemd unit, bearer + confirm nonce) to this host."
+    },
+    "enter_safe_mode": {
+      "status": "unsupported",
+      "note": "stateless; degraded-mode is reported by /health/ready, not toggled."
+    },
+    "exit_safe_mode": {
+      "status": "unsupported"
+    },
+    "set_setting": {
+      "status": "gap",
+      "note": "no runtime-config mutation; source keys are env-at-deploy."
+    },
+    "check_for_update": {
+      "status": "implemented",
+      "maps_to": "GET /ops/check-update",
+      "note": "resolves the running version against admin's /v1/fleet-versions; status + literal remediation (apply_update). Closed 2026-07-13."
+    },
+    "apply_update": {
+      "status": "gap",
+      "note": "SSH-free health-gated redeploy; §7. The windy-mind ops-hook (#61: rebuild + last-good rollback + sha attestation) is the pattern to port to this host."
+    },
+    "reset_to_defaults": {
+      "status": "unsupported",
+      "note": "stateless service — no user state to reset."
+    }
   },
   "tools": [
     {
@@ -27,73 +73,142 @@
       "tier": "auto_allow",
       "baseline_status": "implemented",
       "description": "The FIRST call when Windy Search seems down. Liveness of the search service: returns ok + service + version + environment if the process is up.",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
-      "transport": { "method": "GET", "path": "/health" }
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "transport": {
+        "method": "GET",
+        "path": "/health"
+      }
     },
     {
       "name": "get_status",
       "tier": "auto_allow",
       "baseline_status": "implemented",
       "description": "Read Windy Search's deployment identity — which build is serving right now. Use this to check whether a fix that was meant to deploy is actually live.",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
-      "transport": { "method": "GET", "path": "/version" }
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "transport": {
+        "method": "GET",
+        "path": "/version"
+      }
     },
     {
       "name": "get_capabilities",
       "tier": "auto_allow",
       "baseline_status": "implemented",
       "description": "Report whether Windy Search is actually READY to serve — is Redis reachable, and how many search sources are wired up. A search service with zero configured sources returns empty results while looking 'alive'; this is the honest capability probe that catches that.",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
-      "transport": { "method": "GET", "path": "/health/ready" }
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "transport": {
+        "method": "GET",
+        "path": "/health/ready"
+      }
     },
     {
       "name": "whoami",
       "tier": "auto_allow",
       "description": "Show the passport Windy Search sees for the calling agent — the parsed EPT claims. Use this to diagnose 'it says I'm not who I am' or auth confusion.",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
-      "transport": { "method": "GET", "path": "/whoami" }
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "transport": {
+        "method": "GET",
+        "path": "/whoami"
+      }
     },
     {
       "name": "get_integrity_budget",
       "tier": "auto_allow",
       "description": "Show the calling agent's current integrity (EII) tier and its remaining rate-limit budget at Windy Search. Use this to answer 'why am I being throttled' or 'how many more searches can I do right now'.",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
-      "transport": { "method": "GET", "path": "/integrity" }
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "transport": {
+        "method": "GET",
+        "path": "/integrity"
+      }
     },
     {
       "name": "get_logs",
       "tier": "auto_allow",
       "baseline_status": "implemented",
       "description": "Read Windy Search's recent operational events — server starts, per-source bridge failures by category (quota exhausted, auth/billing, upstream errors), and self-test results. Content-free by construction: the log can only ever hold fixed event names and category codes, never a query, a result, or a raw bridge error. Requires your passport.",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
       "returns": {
         "type": "object",
         "properties": {
-          "count": { "type": "number" },
-          "entries": { "type": "array", "description": "[{ts, level, event, code?}] — fixed vocabulary only" }
+          "count": {
+            "type": "number"
+          },
+          "entries": {
+            "type": "array",
+            "description": "[{ts, level, event, code?}] — fixed vocabulary only"
+          }
         }
       },
-      "transport": { "method": "GET", "path": "/ops/logs" }
+      "transport": {
+        "method": "GET",
+        "path": "/ops/logs"
+      }
     },
     {
       "name": "get_config",
       "tier": "auto_allow",
       "baseline_status": "implemented",
       "description": "Read Windy Search's effective runtime configuration with every secret redacted to a boolean: which search sources actually hold keys (and which are fallbacks), whether Redis, Eternitas integrity-reporting, telemetry, and the page-render chain are wired. Use this when 'search returns nothing' — a service with zero configured sources looks alive but is empty. Requires your passport.",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
       "returns": {
         "type": "object",
         "properties": {
-          "environment": { "type": "string" },
-          "sources": { "type": "object", "description": "{source: {configured, fallback}} — never key material" },
-          "sources_configured": { "type": "number" },
-          "redis_configured": { "type": "boolean" },
-          "integrity_reporting_configured": { "type": "boolean" },
-          "telemetry_configured": { "type": "boolean" },
-          "render_backends": { "type": "array" }
+          "environment": {
+            "type": "string"
+          },
+          "sources": {
+            "type": "object",
+            "description": "{source: {configured, fallback}} — never key material"
+          },
+          "sources_configured": {
+            "type": "number"
+          },
+          "redis_configured": {
+            "type": "boolean"
+          },
+          "integrity_reporting_configured": {
+            "type": "boolean"
+          },
+          "telemetry_configured": {
+            "type": "boolean"
+          },
+          "render_backends": {
+            "type": "array"
+          }
         }
       },
-      "transport": { "method": "GET", "path": "/ops/config" }
+      "transport": {
+        "method": "GET",
+        "path": "/ops/config"
+      }
     },
     {
       "name": "run_selftest",
@@ -103,20 +218,72 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "max_results": { "type": "number", "description": "Canary result cap, 1-5 (default 3)." }
+          "max_results": {
+            "type": "number",
+            "description": "Canary result cap, 1-5 (default 3)."
+          }
         },
         "additionalProperties": false
       },
       "returns": {
         "type": "object",
         "properties": {
-          "passed": { "type": "boolean", "description": "true only when every stage passed ('passed', not 'ok' — top-level ok is reserved for the invoke envelope)" },
-          "stages": { "type": "array", "description": "[{name: config|search, ok, detail}] — counts/bridges/latency, never result content" },
-          "duration_ms": { "type": "number" },
-          "cached": { "type": "boolean" }
+          "passed": {
+            "type": "boolean",
+            "description": "true only when every stage passed ('passed', not 'ok' — top-level ok is reserved for the invoke envelope)"
+          },
+          "stages": {
+            "type": "array",
+            "description": "[{name: config|search, ok, detail}] — counts/bridges/latency, never result content"
+          },
+          "duration_ms": {
+            "type": "number"
+          },
+          "cached": {
+            "type": "boolean"
+          }
         }
       },
-      "transport": { "method": "POST", "path": "/ops/selftest" }
+      "transport": {
+        "method": "POST",
+        "path": "/ops/selftest"
+      }
+    },
+    {
+      "name": "check_for_update",
+      "tier": "auto_allow",
+      "baseline_status": "implemented",
+      "description": "Check whether a newer Windy Search build is available. Resolves the running version against the fleet's version manifest and reports current, update-available (the notes say what it fixes), or must-update (below the minimum supported version). Hands back the literal next step when an update exists. Read-only — never deploys; applying is the separate always-confirm apply_update.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "current | update-available | must-update | unknown"
+          },
+          "installed": {
+            "type": "string"
+          },
+          "current": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "remediation": {
+            "type": "string"
+          }
+        }
+      },
+      "transport": {
+        "method": "GET",
+        "path": "/ops/check-update"
+      }
     }
   ]
 }
