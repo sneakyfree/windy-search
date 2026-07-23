@@ -18,7 +18,7 @@ on:
 
 jobs:
   preflight:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # runner-lint-allow — CD/hosted-only; disabled, manual until CD mission
     if: github.ref == 'refs/heads/main'
     outputs:
       configured: ${{ steps.check.outputs.configured }}
@@ -39,7 +39,7 @@ jobs:
           fi
 
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # runner-lint-allow — CD/hosted-only; disabled, manual until CD mission
     needs: preflight
     if: needs.preflight.outputs.configured == 'true'
     steps:
