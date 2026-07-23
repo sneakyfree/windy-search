@@ -29,9 +29,9 @@ import httpx
 
 from app import telemetry
 from app.dedup import dedup_across_sources
-from app.ops_log import categorize_status, ops_log
 from app.merge import apply_per_source_cap
 from app.normalization import normalize
+from app.ops_log import categorize_status, ops_log
 from app.privacy import rewrite_query
 from app.ranking import rank as bm25_rank
 from app.sources.base import RawResult, Source

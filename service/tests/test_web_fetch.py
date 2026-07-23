@@ -380,7 +380,10 @@ async def test_render_auto_skips_when_plain_is_substantial(gated_client, ept_key
     fake = _FakeRenderer()
     _set_renderer(monkeypatch, fake)
     # A substantial article — no escalation.
-    _patch_fetch_url(monkeypatch, content="<html><body>" + ("Real article paragraph. " * 40) + "</body></html>")
+    _patch_fetch_url(
+        monkeypatch,
+        content="<html><body>" + ("Real article paragraph. " * 40) + "</body></html>",
+    )
     token = sign_test_ept(ept_keypair, passport="ET26-REN-AUT1")
     resp = await gated_client.post(
         "/web/fetch",

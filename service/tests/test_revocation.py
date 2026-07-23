@@ -261,7 +261,6 @@ async def test_webhook_event_blacklists_at_the_gate(gated_client, ept_keypair):
     import json as json_mod
 
     from app.config import get_settings
-    from app.main import app
 
     secret = "test-webhook-secret-revocation"
     token = sign_test_ept(ept_keypair, passport="ET26-REVK-WHK1")
